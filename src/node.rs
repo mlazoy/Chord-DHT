@@ -154,8 +154,57 @@ impl Node  {
         }
     }
 
-    fn handle_join(&self) {
+    fn handle_join(&mut self, peer_ip : Ipv4Addr, peer_port : u16, id: HashType) {
+        if id == self.get_id() {
+            println!("Node is already part of the network.");
+            return;
+        } 
 
+        if self.is_responsible(id) { 
+            self.previous = Some(NodeInfo::new(peer_ip, peer_port, true));
+
+            self.send_msg(self.previous, &json!({
+                "type": format!("{:?}", MsgType::AckJoin),
+                "id": id
+            }).to_string());
+
+            let mut keys_to_transfer = Vec::new();
+            {
+                let records_read = self.records.read().unwrap();
+                for (key, item) in records_read.iter() {
+                    if *key <= id {
+                        keys_to_transfer.push(key.clone());
+                    }
+                }
+            }
+
+            // Remove and send keys to the new node
+            let mut records_write = self.records.write().unwrap();
+            for key in keys_to_transfer {
+                if let Some(item) = records_write.remove(&key) {
+                    self.send_msg(self.previous, &json!({
+                        "type": format!("{:?}", MsgType::Insert),
+                        "id": id,
+                        "record": json!({
+                            "key": key,
+                            "title": item.title
+                        })
+                    }).to_string());
+                }
+            }
+
+        } else if self.is_next_responsible(id) {
+            self.successor = Some(NodeInfo::new(peer_ip, peer_port, true));
+            self.send_msg(self.previous, &json!({
+                "type": format!("{:?}", MsgType::Join),
+                "id": id
+            }).to_string());
+        } else {
+            self.send_msg(self.successor, &json!({
+                "type": format!("{:?}", MsgType::Join),
+                "id": id
+            }).to_string());
+        }
     }
 
     fn handle_ack_join(&mut self, ack_msg:&Value) {
@@ -180,7 +229,24 @@ impl Node  {
 
     }
 
-    fn handle_insert(&self) {
+    fn handle_insert(&self, record: &Value) {
+        let key = HashFunc(record.get("key").unwrap().as_str().unwrap());
+        let title = record.get("title").unwrap().as_str().unwrap().to_string();
+        let item = Item {
+            title,
+            key,
+            replica_idx: 0
+        };
+
+        if self.is_responsible(key) {
+            let mut records = self.records.write().unwrap();
+            records.insert(key, item);
+        } else {
+            self.send_msg(self.successor, &json!({
+                "type": format!("{:?}", MsgType::Insert),
+                "record": record
+            }).to_string());
+        }
 
     }
 
@@ -192,27 +258,6 @@ impl Node  {
 
     }
 
-    fn is_responsible(&self, key:HashType) -> bool {
-        if let Some(prev) = self.previous {
-            if let Some(succ) = self.successor {
-                let prev_input = format!("{}:{}", prev.ip_addr, prev.port);
-                let prev_key = HashFunc(&prev_input);
-                let succ_input = format!("{}:{}", succ.ip_addr, succ.port);
-                let prev_key = HashFunc(&succ_input);
-                if prev_key < self.get_id() {
-                    if key > prev_key && key <= self.get_id() {
-                        return true;
-                    }
-                } else {
-                    if key > prev_key || key <= self.get_id() {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
     pub fn send_msg(&self, destNode: Option<NodeInfo>, msg: &str) -> Option<TcpStream> {
         if let Some(destNode) = destNode {
             destNode.send_msg(msg)
@@ -222,34 +267,60 @@ impl Node  {
         }
     }
 
-    fn get_records(&self, ring_size: usize) {
-        // TODO! netsize
-        //let network_size = self.bootstrap.get_netsize();
-
-        // Acquire a read lock on `records`
-        let records_rlock = self.records.read().unwrap();
-        if ring_size <= self.replication_factor {
-            for (key, value) in records_rlock.iter() {
-                let record = serde_json::json!({
-                    "key": key,
-                    "title": value.title
-                });
-                let record_msg = serde_json::json!({
-                    "type": format!("{:?}", MsgType::Insert),
-                    "record": record
-                });
-                self.send_msg(self.previous, &record_msg.to_string());
-            }
+    fn is_responsible(&self, key: HashType) -> bool {
+        let prev_id = self.previous.unwrap().id;
+        let self_id = self.get_id();
+         // Check if this node is responsible for the key
+        if prev_id < self_id {
+            // Normal case: key falls within (prev, self]
+            key > prev_id && key <= self_id
         } else {
-            for (key, value) in records_rlock.iter() {
-                let key_hash = HashFunc(&value.title);
-                if !self.is_responsible(key_hash) {
-                    // a lot of stuff TODO here
-                }
-            }
-
+            // Wrapped case: previous is greater due to ring wrap-around
+            key > prev_id || key <= self_id
         }
     }
+
+    fn is_next_responsible(&self, key: HashType) -> bool {
+        let succ_id = self.successor.unwrap().id;
+        let self_id = self.get_id();
+        // Check if the successor node is responsible for the key
+        if self_id < succ_id {
+            // Normal case: key falls within (self, successor]
+            key > self_id && key <= succ_id
+        } else {
+            // Wrapped case: self is greater due to ring wrap-around
+            key > self_id || key <= succ_id
+        }
+    }
+
+    // fn get_records(&self, ring_size: usize) {
+    //     // TODO! netsize
+    //     //let network_size = self.bootstrap.get_netsize();
+
+    //     // Acquire a read lock on `records`
+    //     let records_rlock = self.records.read().unwrap();
+    //     if ring_size <= self.replication_factor {
+    //         for (key, value) in records_rlock.iter() {
+    //             let record = serde_json::json!({
+    //                 "key": key,
+    //                 "title": value.title
+    //             });
+    //             let record_msg = serde_json::json!({
+    //                 "type": format!("{:?}", MsgType::Insert),
+    //                 "record": record
+    //             });
+    //             self.send_msg(self.previous, &record_msg.to_string());
+    //         }
+    //     } else {
+    //         for (key, value) in records_rlock.iter() {
+    //             let key_hash = HashFunc(&value.title);
+    //             if !self.is_responsible(key_hash) {
+    //                 // a lot of stuff TODO here
+    //             }
+    //         }
+
+    //     }
+    // }
 
 }
 
@@ -293,7 +364,16 @@ impl ConnectionHandler for Node {
             self.print_debug_msg(&format!("Message type: {}", msg_type));
             match msg_type {
                 "Join" => {
-                    self.handle_join();
+                    if let Some(id_str) = msg_value.get("id").and_then(Value::as_str) {
+                        match HashType::from_hex(id_str) {
+                            Ok(id) => {
+                                self.handle_join(peer_ip, BOOT_PORT, id);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to parse hash ID: {}", e);
+                            }
+                        }
+                    }
                 }
                 "AckJoin" => {
                     self.handle_ack_join(&msg_value);
@@ -305,7 +385,11 @@ impl ConnectionHandler for Node {
                     self.handle_query();
                 }
                 "Insert" => { 
-                    self.handle_insert();
+                   if let Some(record) = msg_value.get("record") {
+                        self.handle_insert(record);
+                    } else {
+                        eprintln!("Received message does not contain a 'record' field.");
+                    }
                 }
                 "Delete" => {
                     self.handle_delete();
