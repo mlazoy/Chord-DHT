@@ -80,7 +80,10 @@ pub fn HashFunc(input: &str) -> HashType {
 
 // wrap ip and port in a single string and call global hashing function
 pub fn HashIP(ip_addr: Ipv4Addr, port: u16) -> HashType { 
-    let input = format!("{}:{}", ip_addr, port);
+    // extract only numbers from ip
+    let ip_numeric = ip_addr.octets().iter().map(|n| n.to_string()).collect::<String>(); 
+    // concatenate result with port
+    let input = ip_numeric + &port.to_string();
     HashFunc(&input)
 }
 
@@ -93,9 +96,9 @@ pub struct Item {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Consistency  {
-    Quorum,
-    Chain,  
     Eventual,
+    Chain,
+    Quorum
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

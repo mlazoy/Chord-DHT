@@ -1,18 +1,19 @@
 use std::net::{TcpListener, TcpStream, Shutdown};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 use serde::{Serialize, Deserialize};
 use std::io::Write;
 use std::io::Read;
+use lazy_static::lazy_static;
 use std::io;
 use serde_json::Value;
 use std::thread;
 use serde_json::json;
 
-use crate::{BOOT_ADDR, BOOT_PORT};
 use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item, MsgType};
 use crate::network::{ConnectionHandler, Server};
+use crate::NUM_THREADS;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -22,18 +23,12 @@ pub struct NodeInfo {
     status: bool                            // denotes if is already in ring
 }
 
-pub const BOOTSTRAP_INFO: NodeInfo = NodeInfo {
-    ip_addr: BOOT_ADDR,
-    port: BOOT_PORT,
-    id : HashIP(BOOT_ADDR, BOOT_PORT),
-    status: true
-};
-
 #[derive(Debug, Clone)]
 pub struct Node {
     info: NodeInfo,                                         // wraps ip, port, status                                  // generated from hash function
     previous : Option<NodeInfo>,                  
     successor : Option<NodeInfo>, 
+    bootstrap : Option<NodeInfo>,
     replication_factor : usize,                             // number of replicas per node
     replication_mode : Consistency,                         // replication mode                
     records : Arc<RwLock<BTreeMap<HashType, Item>>>,       // list of hasehd records per node
@@ -87,58 +82,98 @@ impl NodeInfo {
 
 }
 
-impl Node {
+impl Node  {
 
-    pub fn new(ip_addr:Ipv4Addr, _port: Option<u16>, _k: Option<usize>, _m: Option<Consistency>) -> Self {
+    // fileds startin with _ can be initilaised to None
+    pub fn new( ip:&Ipv4Addr, _port: Option<u16>, 
+                _k_repl: Option<usize>, _m_repl: Option<Consistency>, 
+                _boot_ref: Option<NodeInfo>) -> Self {
         Node {
             info: NodeInfo {
-                ip_addr,
+                ip_addr: *ip,
                 port: _port.unwrap_or(0),  
-                id : HashIP(ip_addr, _port.unwrap_or(0)),
-                status: false
-            },                     // default 
-            replication_factor: _k.unwrap_or(0),
-            replication_mode: _m.unwrap_or(Consistency::Eventual),
+                id : HashIP(*ip, _port.unwrap_or(0)),
+                status: false                                       
+            },                    
+            replication_factor: _k_repl.unwrap_or(0),
+            replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
             successor: None,
             previous: None,
+            bootstrap: _boot_ref,
             records: Arc::new(RwLock::new(BTreeMap::new()))
         }
     }
 
-    pub fn get_id(&self) -> HashType {
+    fn get_id(&self) -> HashType {
         self.info.id
     }
 
-    pub fn set_id(&mut self, id: HashType) {
+    fn set_id(&mut self, id: HashType) {
         self.info.id = id;
     }
 
-    pub fn get_ip(&self) -> Ipv4Addr {
+    fn get_ip(&self) -> Ipv4Addr {
         self.info.ip_addr
     }
 
-    pub fn get_port(&self) -> u16 {
+    fn get_port(&self) -> u16 {
         self.info.port
     }
 
-    pub fn get_status(&self) -> bool {
+    fn get_status(&self) -> bool {
         self.info.status
     }
 
-    pub fn set_status(&mut self, new_status:bool) {
+    fn set_status(&mut self, new_status:bool) {
         self.info.status = new_status
     }
 
-    pub fn join_ring(&self) {
+    pub fn init(&mut self) { 
+        let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
+        match TcpListener::bind(sock_addr) {
+            Ok(listener) => {
+                self.print_debug_msg(&format!("Bootstrap is listening on {}", sock_addr));
+                self.set_status(true);
+                let node_server = Server::new(Arc::new(Mutex::new(self.clone())));
+                node_server.wait_for_requests(listener, NUM_THREADS); 
+            }
+            Err(e) => panic!("Bootstrap Failed to bind to {}: {}", sock_addr, e)    
+        }
+    }
 
+    pub fn join_ring(&self) {
+        // construct a "Join" Request Message
+        let data = serde_json::json!({
+            "type": MsgType::Join,
+            "info": self.info       // serializable
+        });
+        if let Some(bootstrap_node) = self.bootstrap {
+            bootstrap_node.send_msg(&data.to_string());
+        } else {
+            self.print_debug_msg("Cannot locate bootstrap node");
+        }
     }
 
     fn handle_join(&self) {
 
     }
 
-    fn handle_ack_join(&self) {
-
+    fn handle_ack_join(&mut self, ack_msg:&Value) {
+        if let (Some(prev_info), Some(succ_info)) = 
+        (ack_msg.get("prev_info"), ack_msg.get("succ_info"))
+        {
+            if let (Ok(prev_node), Ok(succ_node)) = 
+            (serde_json::from_value::<NodeInfo>(prev_info.clone()), 
+             serde_json::from_value::<NodeInfo>(prev_info.clone())) { // TODO! maybe lock here ?
+                self.previous = Some(prev_node);
+                self.successor = Some(succ_node);
+            } else { 
+                self.print_debug_msg(&format!(
+                    "Invalid info provided for either prev or succ node {}-{}", prev_info, succ_info
+                )); 
+            }
+        } 
+        // TODO! GET RECORDS 
     }
 
     fn handle_update(&self) {
@@ -261,7 +296,7 @@ impl ConnectionHandler for Node {
                     self.handle_join();
                 }
                 "AckJoin" => {
-                    self.handle_ack_join();
+                    self.handle_ack_join(&msg_value);
                 }
                 "Update" => {
                     self.handle_update();
