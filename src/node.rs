@@ -154,7 +154,8 @@ impl Node  {
         }
     }
 
-    fn handle_join(&mut self, peer_ip : Ipv4Addr, peer_port : u16, id: HashType) {
+    fn handle_join(&mut self, peer_ip : Ipv4Addr, id: HashType) {
+        let peer_port = if self.bootstrap.is_none() { self.get_port() } else { self.bootstrap.unwrap().port };
         if id == self.get_id() {
             println!("Node is already part of the network.");
             return;
@@ -367,7 +368,7 @@ impl ConnectionHandler for Node {
                     if let Some(id_str) = msg_value.get("id").and_then(Value::as_str) {
                         match HashType::from_hex(id_str) {
                             Ok(id) => {
-                                self.handle_join(peer_ip, BOOT_PORT, id);
+                                self.handle_join(peer_ip, id);
                             }
                             Err(e) => {
                                 eprintln!("Failed to parse hash ID: {}", e);
