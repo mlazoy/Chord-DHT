@@ -6,14 +6,16 @@ use serde::{Serialize, Deserialize};
 use std::io::Write;
 use std::io::Read;
 use lazy_static::lazy_static;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::io;
-use serde_json::Value;
+use serde_json::{Result, Value};
 use std::thread;
 use serde_json::json;
 
 use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item, MsgType};
 use crate::network::{ConnectionHandler, Server};
-use crate::NUM_THREADS;
+use crate::NUM_THREADS; 
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -132,29 +134,61 @@ impl Node  {
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
         match TcpListener::bind(sock_addr) {
             Ok(listener) => {
-                self.print_debug_msg(&format!("Bootstrap is listening on {}", sock_addr));
+                let node_server = Server::new(self.clone());
                 self.set_status(true);
-                let node_server = Server::new(Arc::new(Mutex::new(self.clone())));
-                node_server.wait_for_requests(listener, NUM_THREADS); 
+                match self.bootstrap {
+                    Some(_) => {
+                        self.print_debug_msg(&format!("Node is listening on {}", sock_addr));
+                        let node_server = Server::new(self.clone());
+
+                        // Shared flag to keep the main thread alive
+                        let running = Arc::new(AtomicBool::new(true));
+                        let running_clone = Arc::clone(&running);
+            
+                        let listener_clone = listener.try_clone().expect("Failed to clone listener");
+                        let server_thread = thread::spawn(move || {
+                            node_server.wait_for_requests(listener_clone, NUM_THREADS);
+                        });
+                        let node_clone = self.clone();
+                        thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(1));  // Give time for server setup
+                            node_clone.join_ring();
+                        });
+            
+                        // Keep the main thread alive so the server keeps running
+                        while running_clone.load(Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                        }
+                        // Ensure the server thread does not exit early
+                        server_thread.join().expect("Server thread panicked"); 
+                    }
+                    _ => {
+                        self.print_debug_msg(&format!("Bootstrap is listening on {}", sock_addr));
+                        node_server.wait_for_requests(listener, NUM_THREADS); 
+                    }
+                }
             }
-            Err(e) => panic!("Bootstrap Failed to bind to {}: {}", sock_addr, e)    
+            Err(e) => panic!("Failed to bind to {}: {}", sock_addr, e)    
         }
     }
 
     pub fn join_ring(&self) {
         // construct a "Join" Request Message
+        self.print_debug_msg("Preparing 'Join' Request...");
         let data = serde_json::json!({
-            "type": MsgType::Join,
+            "type": format!("{:?}", MsgType::Join),
             "info": self.info       // serializable
         });
         if let Some(bootstrap_node) = self.bootstrap {
             bootstrap_node.send_msg(&data.to_string());
+            self.print_debug_msg("Sent 'Join' Request sucessfully");
         } else {
             self.print_debug_msg("Cannot locate bootstrap node");
         }
     }
 
     fn handle_join(&mut self, peer_ip : Ipv4Addr, id: HashType) {
+        self.print_debug_msg(&format!("Received 'Join' Request from {}", id));
         let peer_port = if self.bootstrap.is_none() { self.get_port() } else { self.bootstrap.unwrap().port };
         if id == self.get_id() {
             println!("Node is already part of the network.");
@@ -162,8 +196,8 @@ impl Node  {
         } 
 
         if self.is_responsible(id) { 
+            self.print_debug_msg(&format!("Found position of node {} in the ring", id));
             self.previous = Some(NodeInfo::new(peer_ip, peer_port, true));
-
             self.send_msg(self.previous, &json!({
                 "type": format!("{:?}", MsgType::AckJoin),
                 "id": id

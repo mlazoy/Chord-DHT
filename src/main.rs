@@ -1,8 +1,7 @@
 use std::net::Ipv4Addr;
 use std::env;
 
-use node::NodeInfo;
-use utils::{Consistency, HashType};
+use utils::Consistency;
 
 
 mod utils;
@@ -68,12 +67,11 @@ fn main() {
         "node" => {
             let mut node_instance = node::Node::new(
                 &NODE_ADDR, 
-                None, 
+                Some(8001), 
                 None, 
                 None,
                 Some(bootstrap_info));
-            node_instance.init();
-            node_instance.join_ring();
+                node_instance.init();
         }
         _ => {
             eprintln!("Usage: {} [bootstrap <k> <m> |node]", args[0]);
