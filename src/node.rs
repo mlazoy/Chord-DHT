@@ -106,6 +106,18 @@ impl Node  {
         }
     }
 
+    pub fn clone (&self) -> Self {
+        Node {
+            info: self.info,
+            previous: self.previous,
+            successor: self.successor,
+            bootstrap: self.bootstrap,
+            replication_factor: self.replication_factor,
+            replication_mode: self.replication_mode,
+            records: Arc::clone(&self.records)
+        }
+    }
+
     fn get_id(&self) -> HashType {
         self.info.id
     }
@@ -134,6 +146,10 @@ impl Node  {
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
         match TcpListener::bind(sock_addr) {
             Ok(listener) => {
+                if self.bootstrap.is_none() {
+                    self.previous = Some(self.info);
+                    self.successor = Some(self.info);
+                }
                 let node_server = Server::new(self.clone());
                 self.set_status(true);
                 match self.bootstrap {
@@ -149,6 +165,7 @@ impl Node  {
                         let server_thread = thread::spawn(move || {
                             node_server.wait_for_requests(listener_clone, NUM_THREADS);
                         });
+
                         let node_clone = self.clone();
                         thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(1));  // Give time for server setup
@@ -187,60 +204,76 @@ impl Node  {
         }
     }
 
-    fn handle_join(&mut self, peer_ip : Ipv4Addr, id: HashType) {
-        self.print_debug_msg(&format!("Received 'Join' Request from {}", id));
-        let peer_port = if self.bootstrap.is_none() { self.get_port() } else { self.bootstrap.unwrap().port };
-        if id == self.get_id() {
-            println!("Node is already part of the network.");
-            return;
-        } 
+    fn handle_join(&mut self, msg:&Value) {
+        
+        if let Some(info) = msg.get("info") {
+            if let Ok(new_node) = 
+            serde_json::from_value::<NodeInfo>(info.clone()) { 
+                let id = new_node.id;
+                let peer_port = new_node.port;
+                let peer_ip = new_node.ip_addr;
+                self.print_debug_msg(&format!("New node {} joined the network", id));
+                self.print_debug_msg(&format!("Received 'Join' Request from {}", id));
+            if id == self.get_id() {
+                println!("Node is already part of the network.");
+                return;
+            } 
 
-        if self.is_responsible(id) { 
-            self.print_debug_msg(&format!("Found position of node {} in the ring", id));
-            self.previous = Some(NodeInfo::new(peer_ip, peer_port, true));
-            self.send_msg(self.previous, &json!({
-                "type": format!("{:?}", MsgType::AckJoin),
-                "id": id
-            }).to_string());
+            if self.is_responsible(id) { 
+                self.print_debug_msg(&format!("prev info {:?}", self.previous));
+                self.print_debug_msg(&format!("succ info {:?}", self.successor));
+                let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
+                self.send_msg(new_node, &json!({
+                    "type": format!("{:?}", MsgType::AckJoin),
+                    "prev_info": self.previous,
+                    "succ_info": self.info
+                }).to_string());
+                self.previous = new_node;
 
-            let mut keys_to_transfer = Vec::new();
-            {
-                let records_read = self.records.read().unwrap();
-                for (key, item) in records_read.iter() {
-                    if *key <= id {
-                        keys_to_transfer.push(key.clone());
+                let mut keys_to_transfer = Vec::new();
+                {
+                    let records_read = self.records.read().unwrap();
+                    for (key, item) in records_read.iter() {
+                        if *key <= id {
+                            keys_to_transfer.push(key.clone());
+                        }
                     }
                 }
-            }
 
-            // Remove and send keys to the new node
-            let mut records_write = self.records.write().unwrap();
-            for key in keys_to_transfer {
-                if let Some(item) = records_write.remove(&key) {
-                    self.send_msg(self.previous, &json!({
-                        "type": format!("{:?}", MsgType::Insert),
-                        "id": id,
-                        "record": json!({
-                            "key": key,
-                            "title": item.title
-                        })
-                    }).to_string());
+                // Remove and send keys to the new node
+                let mut records_write = self.records.write().unwrap();
+                for key in keys_to_transfer {
+                    if let Some(item) = records_write.remove(&key) {
+                        self.send_msg(self.previous, &json!({
+                            "type": format!("{:?}", MsgType::Insert),
+                            "id": id,
+                            "record": json!({
+                                "key": key,
+                                "title": item.title
+                            })
+                        }).to_string());
+                    }
                 }
-            }
 
-        } else if self.is_next_responsible(id) {
-            self.successor = Some(NodeInfo::new(peer_ip, peer_port, true));
-            self.send_msg(self.previous, &json!({
-                "type": format!("{:?}", MsgType::Join),
-                "id": id
-            }).to_string());
-        } else {
-            self.send_msg(self.successor, &json!({
-                "type": format!("{:?}", MsgType::Join),
-                "id": id
-            }).to_string());
+            } else if self.is_next_responsible(id) {
+                self.successor = Some(NodeInfo::new(peer_ip, peer_port, true));
+                self.send_msg(self.previous, &json!({
+                    "type": format!("{:?}", MsgType::Join),
+                    "id": id
+                }).to_string());
+            } else {
+                self.send_msg(self.successor, &json!({
+                    "type": format!("{:?}", MsgType::Join),
+                    "id": id
+                }).to_string());
+            }
+        } else { 
+            self.print_debug_msg(&format!(
+                "Invalid info "
+            )); 
         }
-    }
+    } 
+}
 
     fn handle_ack_join(&mut self, ack_msg:&Value) {
         if let (Some(prev_info), Some(succ_info)) = 
@@ -303,6 +336,9 @@ impl Node  {
     }
 
     fn is_responsible(&self, key: HashType) -> bool {
+        if self.previous.is_none() || self.successor.is_none() {
+            return true;
+        }
         let prev_id = self.previous.unwrap().id;
         let self_id = self.get_id();
          // Check if this node is responsible for the key
@@ -399,19 +435,11 @@ impl ConnectionHandler for Node {
             self.print_debug_msg(&format!("Message type: {}", msg_type));
             match msg_type {
                 "Join" => {
-                    if let Some(id_str) = msg_value.get("id").and_then(Value::as_str) {
-                        match HashType::from_hex(id_str) {
-                            Ok(id) => {
-                                self.handle_join(peer_ip, id);
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to parse hash ID: {}", e);
-                            }
-                        }
-                    }
+                    self.handle_join(&msg_value);
                 }
                 "AckJoin" => {
                     self.handle_ack_join(&msg_value);
+                    self.print_debug_msg(&format!("prev and succ {:?}-{:?}", self.previous, self.successor));
                 }
                 "Update" => {
                     self.handle_update();
