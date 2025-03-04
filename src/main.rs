@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 use std::env;
 
 use utils::Consistency;
+use utils::get_local_ip;
 
 
 mod utils;
@@ -14,7 +15,6 @@ const BOOT_PORT: u16 = 8000;
 const NUM_THREADS: usize = 4;
 
 // for testing locally only
-const NODE_ADDR:Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
 
 fn main() {
     println!("Entering Chord-DHT Network...");
@@ -66,7 +66,7 @@ fn main() {
         }
         "node" => {
             let mut node_instance = node::Node::new(
-                &NODE_ADDR, 
+                &get_local_ip(), 
                 Some(8001), 
                 None, 
                 None,

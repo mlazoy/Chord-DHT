@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest,Sha1};
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, UdpSocket};
 use hex::{FromHex, ToHex};
 use std::cmp::Ord;
 
@@ -114,6 +114,17 @@ pub enum MsgType {
     Insert,
     Delete,
     Query
+}
+
+pub fn get_local_ip() -> Ipv4Addr {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket");
+    socket.connect("8.8.8.8:80").expect("Failed to connect to external server");
+    if let Ok(local_addr) = socket.local_addr() {
+        if let std::net::IpAddr::V4(ipv4) = local_addr.ip() {
+            return ipv4;
+        }
+    }
+    Ipv4Addr::new(127, 0, 0, 1) // Fallback to loopback if something fails
 }
 
 

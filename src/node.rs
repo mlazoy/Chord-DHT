@@ -149,6 +149,7 @@ impl Node  {
                 if self.bootstrap.is_none() {
                     self.previous = Some(self.info);
                     self.successor = Some(self.info);
+                    self.set_status(true);
                 }
                 let node_server = Server::new(self.clone());
                 self.set_status(true);
@@ -212,22 +213,26 @@ impl Node  {
                 let id = new_node.id;
                 let peer_port = new_node.port;
                 let peer_ip = new_node.ip_addr;
-                self.print_debug_msg(&format!("New node {} joined the network", id));
-                self.print_debug_msg(&format!("Received 'Join' Request from {}", id));
             if id == self.get_id() {
                 println!("Node is already part of the network.");
                 return;
             } 
 
             if self.is_responsible(id) { 
-                self.print_debug_msg(&format!("prev info {:?}", self.previous));
-                self.print_debug_msg(&format!("succ info {:?}", self.successor));
+                self.print_debug_msg(&format!("Sending 'AckJoin' Request to new node {}", peer_ip));
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
                 self.send_msg(new_node, &json!({
                     "type": format!("{:?}", MsgType::AckJoin),
                     "prev_info": self.previous,
                     "succ_info": self.info
                 }).to_string());
+                if self.bootstrap.is_none() {
+                    self.print_debug_msg(&format!("Sending 'Update' Request to previous node {}", self.previous.unwrap().ip_addr));
+                    self.send_msg(self.previous, &json!({
+                        "type": format!("{:?}", MsgType::Update),
+                        "succ_info": new_node
+                    }).to_string());
+                }
                 self.previous = new_node;
 
                 let mut keys_to_transfer = Vec::new();
@@ -256,15 +261,20 @@ impl Node  {
                 }
 
             } else if self.is_next_responsible(id) {
-                self.successor = Some(NodeInfo::new(peer_ip, peer_port, true));
-                self.send_msg(self.previous, &json!({
-                    "type": format!("{:?}", MsgType::Join),
-                    "id": id
-                }).to_string());
-            } else {
+                self.print_debug_msg(&format!("Sending 'Join' Request to successor {}", self.successor.unwrap().ip_addr));
+                let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
                 self.send_msg(self.successor, &json!({
                     "type": format!("{:?}", MsgType::Join),
-                    "id": id
+                    "info": new_node
+                }).to_string());
+                self.successor = new_node;
+            } else {
+                self.print_debug_msg(&format!(
+                    "Forwarding 'Join' Request to successor {}", self.successor.unwrap().ip_addr
+                ));
+                self.send_msg(self.successor, &json!({
+                    "type": format!("{:?}", MsgType::Join),
+                    "info": new_node
                 }).to_string());
             }
         } else { 
@@ -281,7 +291,7 @@ impl Node  {
         {
             if let (Ok(prev_node), Ok(succ_node)) = 
             (serde_json::from_value::<NodeInfo>(prev_info.clone()), 
-             serde_json::from_value::<NodeInfo>(prev_info.clone())) { // TODO! maybe lock here ?
+             serde_json::from_value::<NodeInfo>(succ_info.clone())) { // TODO! maybe lock here ?
                 self.previous = Some(prev_node);
                 self.successor = Some(succ_node);
             } else { 
@@ -293,7 +303,16 @@ impl Node  {
         // TODO! GET RECORDS 
     }
 
-    fn handle_update(&self) {
+    fn handle_update(&mut self, msg:&Value) {
+        if let Some(succ_info) = msg.get("succ_info") {
+            if let Ok(succ_node) = serde_json::from_value::<NodeInfo>(succ_info.clone()) {
+                self.successor = Some(succ_node);
+            } else {
+                self.print_debug_msg(&format!(
+                    "Invalid info provided for successor node {}", succ_info
+                ));
+            }
+        }
 
     }
 
@@ -347,7 +366,7 @@ impl Node  {
             key > prev_id && key <= self_id
         } else {
             // Wrapped case: previous is greater due to ring wrap-around
-            key > prev_id || key <= self_id
+            key >= prev_id || key <= self_id
         }
     }
 
@@ -357,10 +376,11 @@ impl Node  {
         // Check if the successor node is responsible for the key
         if self_id < succ_id {
             // Normal case: key falls within (self, successor]
+            self.print_debug_msg("Normal case");
             key > self_id && key <= succ_id
         } else {
             // Wrapped case: self is greater due to ring wrap-around
-            key > self_id || key <= succ_id
+            key >= self_id || key <= succ_id
         }
     }
 
@@ -429,7 +449,6 @@ impl ConnectionHandler for Node {
                 return;
             }
         };
-        self.print_debug_msg(&format!("Message value: {}", msg_value));
                     
         if let Some(msg_type) = msg_value.get("type").and_then(Value::as_str) {
             self.print_debug_msg(&format!("Message type: {}", msg_type));
@@ -439,10 +458,9 @@ impl ConnectionHandler for Node {
                 }
                 "AckJoin" => {
                     self.handle_ack_join(&msg_value);
-                    self.print_debug_msg(&format!("prev and succ {:?}-{:?}", self.previous, self.successor));
                 }
                 "Update" => {
-                    self.handle_update();
+                    self.handle_update(&msg_value);
                 }
                 "Query" => {
                     self.handle_query();
