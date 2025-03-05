@@ -11,7 +11,7 @@ mod network;
 
 // Bootsrap node info are globally known 
 const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
-const BOOT_PORT: u16 = 8000; 
+const API_PORT: u16 = 8000; 
 const NUM_THREADS: usize = 4;
 
 // for testing locally only
@@ -29,7 +29,7 @@ fn main() {
     // create a reference for each app starting 
     let bootstrap_info= node::NodeInfo::new(
         BOOT_ADDR, 
-        BOOT_PORT, 
+        API_PORT, 
         true);
 
     match args[1].as_str() {
@@ -55,7 +55,7 @@ fn main() {
                 };
                 let mut boot_node = node::Node::new(
                     &BOOT_ADDR,
-                    Some(BOOT_PORT),
+                    Some(API_PORT),
                     Some(k),
                     Some(m),
                     None            // denotes ptr to itself
@@ -67,11 +67,14 @@ fn main() {
         "node" => {
             let mut node_instance = node::Node::new(
                 &get_local_ip(), 
-                Some(8001), 
+                Some(API_PORT),     // test this
                 None, 
                 None,
                 Some(bootstrap_info));
                 node_instance.init();
+
+            // test departure with a timer 
+            //node_instance.quit_ring();
         }
         _ => {
             eprintln!("Usage: {} [bootstrap <k> <m> |node]", args[0]);

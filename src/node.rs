@@ -1,15 +1,11 @@
 use std::net::{TcpListener, TcpStream, Shutdown};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
-use std::io::Write;
-use std::io::Read;
-use lazy_static::lazy_static;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::io;
-use serde_json::{Result, Value};
+use std::io::{Read,Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use serde_json::Value;
 use std::thread;
 use serde_json::json;
 
@@ -193,16 +189,41 @@ impl Node  {
     pub fn join_ring(&self) {
         // construct a "Join" Request Message
         self.print_debug_msg("Preparing 'Join' Request...");
-        let data = serde_json::json!({
-            "type": format!("{:?}", MsgType::Join),
+        let join_data = serde_json::json!({
+            "type": MsgType::Join,
             "info": self.info       // serializable
         });
         if let Some(bootstrap_node) = self.bootstrap {
-            bootstrap_node.send_msg(&data.to_string());
+            bootstrap_node.send_msg(&join_data.to_string());
             self.print_debug_msg("Sent 'Join' Request sucessfully");
         } else {
             self.print_debug_msg("Cannot locate bootstrap node");
         }
+    }
+
+    pub fn quit_ring(&self) {
+        self.print_debug_msg("Preparing to Quit...");
+        // construct a "Quit" Request Message for previous
+        if let Some(prev_node) = self.previous {
+            let quit_data_prev = serde_json::json!({
+                "type": MsgType::Quit,
+                "id": self.get_id(),
+                "neighbor": self.previous
+            });
+            prev_node.send_msg(&quit_data_prev.to_string());
+            self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", prev_node));
+        }
+        if let Some(succ_node) = self.successor {
+        // construct a "Quit" Request Message for successor
+            let quit_data_succ = serde_json::json!({
+                "type": MsgType::Quit,
+                "id": self.get_id(),
+                "neighbor": self.successor
+            });
+            succ_node.send_msg(&quit_data_succ.to_string());
+            self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", succ_node));
+        }
+
     }
 
     fn handle_join(&mut self, msg:&Value) {
@@ -222,16 +243,19 @@ impl Node  {
                 self.print_debug_msg(&format!("Sending 'AckJoin' Request to new node {}", peer_ip));
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
                 self.send_msg(new_node, &json!({
-                    "type": format!("{:?}", MsgType::AckJoin),
+                    "type": MsgType::AckJoin,
                     "prev_info": self.previous,
                     "succ_info": self.info
                 }).to_string());
-                if self.bootstrap.is_none() {
+                if !self.previous.is_none() && self.info.id != self.previous.unwrap().id {
                     self.print_debug_msg(&format!("Sending 'Update' Request to previous node {}", self.previous.unwrap().ip_addr));
                     self.send_msg(self.previous, &json!({
-                        "type": format!("{:?}", MsgType::Update),
+                        "type": MsgType::Update,
                         "succ_info": new_node
                     }).to_string());
+                } else {
+                    self.print_debug_msg(&format!("Updating successor locally to {:?}", new_node));
+                    self.successor = new_node; // update locally
                 }
                 self.previous = new_node;
 
@@ -247,24 +271,24 @@ impl Node  {
 
                 // Remove and send keys to the new node
                 let mut records_write = self.records.write().unwrap();
+                let mut vec_items: Vec<Item> = Vec::with_capacity(keys_to_transfer.len());
                 for key in keys_to_transfer {
                     if let Some(item) = records_write.remove(&key) {
-                        self.send_msg(self.previous, &json!({
-                            "type": format!("{:?}", MsgType::Insert),
-                            "id": id,
-                            "record": json!({
-                                "key": key,
-                                "title": item.title
-                            })
-                        }).to_string());
+                        vec_items.push(item);
                     }
                 }
+                // send a compact message with all records
+                self.send_msg(self.previous, &json!({
+                    "type": MsgType::Insert,
+                    "id": id,
+                    "records": vec_items        // is serializable
+                }).to_string());
 
             } else if self.is_next_responsible(id) {
                 self.print_debug_msg(&format!("Sending 'Join' Request to successor {}", self.successor.unwrap().ip_addr));
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
                 self.send_msg(self.successor, &json!({
-                    "type": format!("{:?}", MsgType::Join),
+                    "type": MsgType::Join,
                     "info": new_node
                 }).to_string());
                 self.successor = new_node;
@@ -273,7 +297,7 @@ impl Node  {
                     "Forwarding 'Join' Request to successor {}", self.successor.unwrap().ip_addr
                 ));
                 self.send_msg(self.successor, &json!({
-                    "type": format!("{:?}", MsgType::Join),
+                    "type": MsgType::Join,
                     "info": new_node
                 }).to_string());
             }
@@ -300,7 +324,6 @@ impl Node  {
                 )); 
             }
         } 
-        // TODO! GET RECORDS 
     }
 
     fn handle_update(&mut self, msg:&Value) {
@@ -312,11 +335,47 @@ impl Node  {
                     "Invalid info provided for successor node {}", succ_info
                 ));
             }
+        } else {
+            self.print_debug_msg("Message doesn't contain successor node info");
         }
-
     }
 
-    fn handle_insert(&self, record: &Value) {
+    fn handle_quit(&mut self, msg:&Value) {
+        if let (Some(id), Some(neighbor_info)) = (msg.get("id"), msg.get("neighbor")) {
+            if let (Ok(quit_id), Ok(neighbor_node)) = (serde_json::from_value::<HashType>(id.clone()),
+                serde_json::from_value::<NodeInfo>(neighbor_info.clone())) {
+                // check if it's coming from previous or successor
+                if !self.previous.is_none() && quit_id == self.previous.unwrap().id {
+                    self.previous = Some(neighbor_node);
+                } else if !self.successor.is_none() && quit_id == self.successor.unwrap().id {
+                    self.successor = Some(neighbor_node);
+                } else {
+                    self.print_debug_msg(&format!(
+                        "Invalid quit message from node: {}", quit_id
+                    ));
+                }
+            } else {
+                self.print_debug_msg(&format!(
+                    "Invalid id or neigbor info provided: {}-{}", id, neighbor_info
+                ));
+            }
+        } else {
+            self.print_debug_msg("Message doesn't contain either quitting or new neigbor node info");
+        }
+    }
+
+    fn handle_insert(&self, input: &Value) {
+        if input.is_array() {
+            for item in input.as_array().unwrap() {
+                self.insert_aux(item);
+            }
+        } else {
+            self.insert_aux(input);
+        }
+    }
+
+    fn insert_aux(&self, record: &Value) {
+        // TODO! handle replicas 
         let key = HashFunc(record.get("key").unwrap().as_str().unwrap());
         let title = record.get("title").unwrap().as_str().unwrap().to_string();
         let item = Item {
@@ -330,7 +389,7 @@ impl Node  {
             records.insert(key, item);
         } else {
             self.send_msg(self.successor, &json!({
-                "type": format!("{:?}", MsgType::Insert),
+                "type": MsgType::Insert,
                 "record": record
             }).to_string());
         }
@@ -345,9 +404,9 @@ impl Node  {
 
     }
 
-    pub fn send_msg(&self, destNode: Option<NodeInfo>, msg: &str) -> Option<TcpStream> {
-        if let Some(destNode) = destNode {
-            destNode.send_msg(msg)
+    pub fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &str) -> Option<TcpStream> {
+        if let Some(dest) = dest_node {
+            dest.send_msg(msg)
         } else {
             eprintln!("Failed to send message: destination node not found");
             None
@@ -383,6 +442,7 @@ impl Node  {
             key >= self_id || key <= succ_id
         }
     }
+}
 
     // fn get_records(&self, ring_size: usize) {
     //     // TODO! netsize
@@ -412,8 +472,6 @@ impl Node  {
 
     //     }
     // }
-
-}
 
 impl ConnectionHandler for Node {
     fn handle_request(&mut self, mut stream: TcpStream) {
@@ -461,6 +519,9 @@ impl ConnectionHandler for Node {
                 }
                 "Update" => {
                     self.handle_update(&msg_value);
+                }
+                "Quit" => {
+                    self.handle_quit(&msg_value);
                 }
                 "Query" => {
                     self.handle_query();

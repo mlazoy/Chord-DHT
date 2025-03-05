@@ -87,7 +87,7 @@ pub fn HashIP(ip_addr: Ipv4Addr, port: u16) -> HashType {
     HashFunc(&input)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub title : String, 
     pub key : HashType,
