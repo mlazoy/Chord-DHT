@@ -3,7 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use threadpool::ThreadPool;
 
 pub trait ConnectionHandler: Send + Sync {
-    fn handle_request(&mut self, stream: TcpStream);
+    fn handle_request(&self, stream: TcpStream);
 }
 
 pub struct Server<T: ConnectionHandler> {
@@ -25,7 +25,7 @@ impl<T: ConnectionHandler + 'static> Server<T> {
                     let handler = Arc::clone(&self.handler);
                     pool.execute(move || {
                         // Lock the mutex to get mutable access
-                        let mut handler = handler.lock().unwrap();
+                        let handler = handler.lock().unwrap();
                         handler.handle_request(stream);
                     });
                 }

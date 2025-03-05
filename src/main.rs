@@ -29,8 +29,7 @@ fn main() {
     // create a reference for each app starting 
     let bootstrap_info= node::NodeInfo::new(
         BOOT_ADDR, 
-        API_PORT, 
-        true);
+        API_PORT); 
 
     match args[1].as_str() {
         "bootstrap" => {
@@ -53,7 +52,7 @@ fn main() {
                     _ => panic!("Invalid parameter for replication mode: m\n 
                                 <m> = \t\t [0 -> Eventual | 1 -> Chain | 2 -> Quorum]")
                 };
-                let mut boot_node = node::Node::new(
+                let boot_node = node::Node::new(
                     &BOOT_ADDR,
                     Some(API_PORT),
                     Some(k),
@@ -65,16 +64,21 @@ fn main() {
 
         }
         "node" => {
-            let mut node_instance = node::Node::new(
+            let node_instance = node::Node::new(
                 &get_local_ip(), 
-                Some(API_PORT),     // test this
+                Some(API_PORT+1),     // test this
                 None, 
                 None,
                 Some(bootstrap_info));
-                node_instance.init();
+            
+            // let node_clone = node_instance.clone();
+            // // test departure with a timer 
+            // let _quit_thread = std::thread::spawn(move || {
+            //     std::thread::sleep(std::time::Duration::from_secs(20)); 
+            //     node_clone.quit_ring();  
+            // });
 
-            // test departure with a timer 
-            //node_instance.quit_ring();
+            node_instance.init();
         }
         _ => {
             eprintln!("Usage: {} [bootstrap <k> <m> |node]", args[0]);

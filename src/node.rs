@@ -1,10 +1,10 @@
-use std::net::{TcpListener, TcpStream, Shutdown};
+use std::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
-use std::io::{Read,Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Read,Write};
 use serde_json::Value;
 use std::thread;
 use serde_json::json;
@@ -17,28 +17,27 @@ use crate::NUM_THREADS;
 pub struct NodeInfo {
     ip_addr: Ipv4Addr,
     port: u16,
-    id : HashType,
-    status: bool                            // denotes if is already in ring
+    id : HashType
 }
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    info: NodeInfo,                                         // wraps ip, port, status                                  // generated from hash function
-    previous : Option<NodeInfo>,                  
-    successor : Option<NodeInfo>, 
-    bootstrap : Option<NodeInfo>,
+    info: Arc<RwLock<NodeInfo>>,                            // wraps ip, port, status                                  // generated from hash function
+    previous : Arc<RwLock<Option<NodeInfo>>>,                  
+    successor : Arc<RwLock<Option<NodeInfo>>>, 
+    bootstrap : Option<NodeInfo>,                           // no lock because it is read only
     replication_factor : usize,                             // number of replicas per node
     replication_mode : Consistency,                         // replication mode                
     records : Arc<RwLock<BTreeMap<HashType, Item>>>,       // list of hasehd records per node
+    status: Arc<AtomicBool>                                // denotes if server is alive
 }
 
 impl NodeInfo {
-    pub fn new(ip_addr:Ipv4Addr, port:u16, status:bool) -> Self {
+    pub fn new(ip_addr:Ipv4Addr, port:u16) -> Self {
         NodeInfo {
             ip_addr,
             port,
-            id: HashIP(ip_addr, port),
-            status,
+            id: HashIP(ip_addr, port)
         }
     }
 
@@ -86,65 +85,89 @@ impl Node  {
     pub fn new( ip:&Ipv4Addr, _port: Option<u16>, 
                 _k_repl: Option<usize>, _m_repl: Option<Consistency>, 
                 _boot_ref: Option<NodeInfo>) -> Self {
+
+        let init_info = NodeInfo {
+            ip_addr: *ip,
+            port: _port.unwrap_or(0),  
+            id : HashIP(*ip, _port.unwrap_or(0)),                                     
+        };
+
         Node {
-            info: NodeInfo {
-                ip_addr: *ip,
-                port: _port.unwrap_or(0),  
-                id : HashIP(*ip, _port.unwrap_or(0)),
-                status: false                                       
-            },                    
+            info: Arc::new(RwLock::new(init_info)),                
             replication_factor: _k_repl.unwrap_or(0),
             replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
-            successor: None,
-            previous: None,
+            successor: Arc::new(RwLock::new(None)),
+            previous: Arc::new(RwLock::new(None)),
             bootstrap: _boot_ref,
-            records: Arc::new(RwLock::new(BTreeMap::new()))
+            records: Arc::new(RwLock::new(BTreeMap::new())),
+            status: Arc::new(AtomicBool::new(false)) 
         }
     }
 
     pub fn clone (&self) -> Self {
         Node {
-            info: self.info,
-            previous: self.previous,
-            successor: self.successor,
+            info: Arc::clone(&self.info),
+            previous: Arc::clone(&self.previous),
+            successor: Arc::clone(&self.successor),
             bootstrap: self.bootstrap,
             replication_factor: self.replication_factor,
             replication_mode: self.replication_mode,
-            records: Arc::clone(&self.records)
+            records: Arc::clone(&self.records),
+            status: Arc::clone(&self.status)
         }
     }
 
     fn get_id(&self) -> HashType {
-        self.info.id
+        self.info.read().unwrap().id
     }
 
-    fn set_id(&mut self, id: HashType) {
-        self.info.id = id;
+    fn set_id(&self, id: HashType) {
+        self.info.write().unwrap().id = id;
     }
 
     fn get_ip(&self) -> Ipv4Addr {
-        self.info.ip_addr
+        self.info.read().unwrap().ip_addr
     }
 
     fn get_port(&self) -> u16 {
-        self.info.port
+        self.info.read().unwrap().port
     }
 
     fn get_status(&self) -> bool {
-        self.info.status
+        self.status.load(Ordering::SeqCst)
     }
 
-    fn set_status(&mut self, new_status:bool) {
-        self.info.status = new_status
+    fn set_status(&self, new_status:bool) {
+        self.status.store(new_status, Ordering::Relaxed);
     }
 
-    pub fn init(&mut self) { 
+    fn get_prev(&self) -> Option<NodeInfo> {
+        *self.previous.read().unwrap()
+    }
+
+    fn get_succ(&self) -> Option<NodeInfo> {
+        *self.successor.read().unwrap()
+    }
+
+    fn set_prev(&self, new_node:Option<NodeInfo>) {
+        *self.previous.write().unwrap() = new_node;
+    }
+
+    fn set_succ(&self, new_node:Option<NodeInfo>) {
+        *self.successor.write().unwrap() = new_node;
+    }
+
+    fn get_info(&self) -> NodeInfo {
+        *self.info.read().unwrap()
+    }
+
+    pub fn init(&self) { 
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
         match TcpListener::bind(sock_addr) {
             Ok(listener) => {
                 if self.bootstrap.is_none() {
-                    self.previous = Some(self.info);
-                    self.successor = Some(self.info);
+                    self.set_prev(Some(self.get_info()));
+                    self.set_succ(Some(self.get_info()));
                     self.set_status(true);
                 }
                 let node_server = Server::new(self.clone());
@@ -153,10 +176,6 @@ impl Node  {
                     Some(_) => {
                         self.print_debug_msg(&format!("Node is listening on {}", sock_addr));
                         let node_server = Server::new(self.clone());
-
-                        // Shared flag to keep the main thread alive
-                        let running = Arc::new(AtomicBool::new(true));
-                        let running_clone = Arc::clone(&running);
             
                         let listener_clone = listener.try_clone().expect("Failed to clone listener");
                         let server_thread = thread::spawn(move || {
@@ -170,7 +189,7 @@ impl Node  {
                         });
             
                         // Keep the main thread alive so the server keeps running
-                        while running_clone.load(Ordering::SeqCst) {
+                        while self.get_status() {
                             std::thread::sleep(std::time::Duration::from_secs(1));
                         }
                         // Ensure the server thread does not exit early
@@ -191,7 +210,7 @@ impl Node  {
         self.print_debug_msg("Preparing 'Join' Request...");
         let join_data = serde_json::json!({
             "type": MsgType::Join,
-            "info": self.info       // serializable
+            "info": self.get_info()      // serializable
         });
         if let Some(bootstrap_node) = self.bootstrap {
             bootstrap_node.send_msg(&join_data.to_string());
@@ -204,29 +223,37 @@ impl Node  {
     pub fn quit_ring(&self) {
         self.print_debug_msg("Preparing to Quit...");
         // construct a "Quit" Request Message for previous
-        if let Some(prev_node) = self.previous {
-            let quit_data_prev = serde_json::json!({
-                "type": MsgType::Quit,
-                "id": self.get_id(),
-                "neighbor": self.previous
-            });
-            prev_node.send_msg(&quit_data_prev.to_string());
-            self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", prev_node));
+        let prev = self.get_prev();
+        if let Some(prev_node) = prev {
+            if prev_node.id != self.get_id() {
+                let quit_data_prev = serde_json::json!({
+                    "type": MsgType::Quit,
+                    "id": self.get_id(),
+                    "neighbor": prev
+                });
+                prev_node.send_msg(&quit_data_prev.to_string());
+                self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", prev_node));
+            }
         }
-        if let Some(succ_node) = self.successor {
-        // construct a "Quit" Request Message for successor
-            let quit_data_succ = serde_json::json!({
-                "type": MsgType::Quit,
-                "id": self.get_id(),
-                "neighbor": self.successor
-            });
-            succ_node.send_msg(&quit_data_succ.to_string());
-            self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", succ_node));
+        let succ = self.get_succ();
+        if let Some(succ_node) = succ{
+                if succ_node.id != self.get_id() {
+            // construct a "Quit" Request Message for successor
+                let quit_data_succ = serde_json::json!({
+                    "type": MsgType::Quit,
+                    "id": self.get_id(),
+                    "neighbor": succ
+                });
+                succ_node.send_msg(&quit_data_succ.to_string());
+                self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", succ_node));
+            }
         }
+        // close the server and terminate gracefully
+        self.set_status(false);
 
     }
 
-    fn handle_join(&mut self, msg:&Value) {
+    fn handle_join(&self, msg:&Value) {
         
         if let Some(info) = msg.get("info") {
             if let Ok(new_node) = 
@@ -238,26 +265,31 @@ impl Node  {
                 println!("Node is already part of the network.");
                 return;
             } 
+            // get a read lock on neighbors
+            let prev_rd = self.get_prev();
+            let succ_rd = self.get_succ();
 
             if self.is_responsible(id) { 
                 self.print_debug_msg(&format!("Sending 'AckJoin' Request to new node {}", peer_ip));
-                let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
+                let new_node = Some(NodeInfo::new(peer_ip, peer_port));
+
                 self.send_msg(new_node, &json!({
                     "type": MsgType::AckJoin,
-                    "prev_info": self.previous,
-                    "succ_info": self.info
+                    "prev_info": prev_rd,
+                    "succ_info": self.get_info()
                 }).to_string());
-                if !self.previous.is_none() && self.info.id != self.previous.unwrap().id {
-                    self.print_debug_msg(&format!("Sending 'Update' Request to previous node {}", self.previous.unwrap().ip_addr));
-                    self.send_msg(self.previous, &json!({
+
+                if !prev_rd.is_none() && self.get_id() != prev_rd.unwrap().id {
+                    self.print_debug_msg(&format!("Sending 'Update' Request to previous node {:?}", prev_rd));
+                    self.send_msg(prev_rd, &json!({
                         "type": MsgType::Update,
                         "succ_info": new_node
                     }).to_string());
                 } else {
                     self.print_debug_msg(&format!("Updating successor locally to {:?}", new_node));
-                    self.successor = new_node; // update locally
+                    self.set_succ(new_node);
                 }
-                self.previous = new_node;
+                self.set_prev(new_node);
 
                 let mut keys_to_transfer = Vec::new();
                 {
@@ -278,25 +310,27 @@ impl Node  {
                     }
                 }
                 // send a compact message with all records
-                self.send_msg(self.previous, &json!({
+                self.send_msg(prev_rd, &json!({
                     "type": MsgType::Insert,
                     "id": id,
                     "records": vec_items        // is serializable
                 }).to_string());
 
             } else if self.is_next_responsible(id) {
-                self.print_debug_msg(&format!("Sending 'Join' Request to successor {}", self.successor.unwrap().ip_addr));
-                let new_node = Some(NodeInfo::new(peer_ip, peer_port, true));
-                self.send_msg(self.successor, &json!({
+                self.print_debug_msg(&format!("Sending 'Join' Request to successor {}", succ_rd.unwrap().ip_addr));
+                let new_node = Some(NodeInfo::new(peer_ip, peer_port));
+                self.send_msg(succ_rd, &json!({
                     "type": MsgType::Join,
                     "info": new_node
                 }).to_string());
-                self.successor = new_node;
+
+                self.set_succ(new_node);
+
             } else {
                 self.print_debug_msg(&format!(
-                    "Forwarding 'Join' Request to successor {}", self.successor.unwrap().ip_addr
+                    "Forwarding 'Join' Request to successor {:?}", succ_rd
                 ));
-                self.send_msg(self.successor, &json!({
+                self.send_msg(succ_rd, &json!({
                     "type": MsgType::Join,
                     "info": new_node
                 }).to_string());
@@ -309,15 +343,15 @@ impl Node  {
     } 
 }
 
-    fn handle_ack_join(&mut self, ack_msg:&Value) {
+    fn handle_ack_join(&self, ack_msg:&Value) {
         if let (Some(prev_info), Some(succ_info)) = 
         (ack_msg.get("prev_info"), ack_msg.get("succ_info"))
         {
             if let (Ok(prev_node), Ok(succ_node)) = 
             (serde_json::from_value::<NodeInfo>(prev_info.clone()), 
              serde_json::from_value::<NodeInfo>(succ_info.clone())) { // TODO! maybe lock here ?
-                self.previous = Some(prev_node);
-                self.successor = Some(succ_node);
+                self.set_prev(Some(prev_node));
+                self.set_succ(Some(succ_node));
             } else { 
                 self.print_debug_msg(&format!(
                     "Invalid info provided for either prev or succ node {}-{}", prev_info, succ_info
@@ -326,10 +360,10 @@ impl Node  {
         } 
     }
 
-    fn handle_update(&mut self, msg:&Value) {
+    fn handle_update(&self, msg:&Value) {
         if let Some(succ_info) = msg.get("succ_info") {
             if let Ok(succ_node) = serde_json::from_value::<NodeInfo>(succ_info.clone()) {
-                self.successor = Some(succ_node);
+                self.set_succ(Some(succ_node)); 
             } else {
                 self.print_debug_msg(&format!(
                     "Invalid info provided for successor node {}", succ_info
@@ -340,20 +374,24 @@ impl Node  {
         }
     }
 
-    fn handle_quit(&mut self, msg:&Value) {
+    fn handle_quit(&self, msg:&Value) {
         if let (Some(id), Some(neighbor_info)) = (msg.get("id"), msg.get("neighbor")) {
             if let (Ok(quit_id), Ok(neighbor_node)) = (serde_json::from_value::<HashType>(id.clone()),
                 serde_json::from_value::<NodeInfo>(neighbor_info.clone())) {
                 // check if it's coming from previous or successor
-                if !self.previous.is_none() && quit_id == self.previous.unwrap().id {
-                    self.previous = Some(neighbor_node);
-                } else if !self.successor.is_none() && quit_id == self.successor.unwrap().id {
-                    self.successor = Some(neighbor_node);
-                } else {
-                    self.print_debug_msg(&format!(
-                        "Invalid quit message from node: {}", quit_id
-                    ));
-                }
+                let prev_rd = self.get_prev();
+                if !prev_rd.is_none() && quit_id == prev_rd.unwrap().id {
+                    self.set_prev(Some(neighbor_node));
+                    return;
+                } 
+                let succ_rd = self.get_succ();
+                if !succ_rd.is_none() && quit_id == succ_rd.unwrap().id {
+                    self.set_succ(Some(neighbor_node));
+                    return;
+                } 
+                self.print_debug_msg(&format!(
+                    "Invalid quit message from node: {}", quit_id
+                ));
             } else {
                 self.print_debug_msg(&format!(
                     "Invalid id or neigbor info provided: {}-{}", id, neighbor_info
@@ -388,7 +426,7 @@ impl Node  {
             let mut records = self.records.write().unwrap();
             records.insert(key, item);
         } else {
-            self.send_msg(self.successor, &json!({
+            self.send_msg(*self.successor.read().unwrap(), &json!({
                 "type": MsgType::Insert,
                 "record": record
             }).to_string());
@@ -414,10 +452,13 @@ impl Node  {
     }
 
     fn is_responsible(&self, key: HashType) -> bool {
-        if self.previous.is_none() || self.successor.is_none() {
+        // get read locks first 
+        let prev_rd = self.get_prev();
+        let succ_rd = self.get_succ();
+        if prev_rd.is_none() || succ_rd.is_none() {
             return true;
         }
-        let prev_id = self.previous.unwrap().id;
+        let prev_id = prev_rd.unwrap().id;
         let self_id = self.get_id();
          // Check if this node is responsible for the key
         if prev_id < self_id {
@@ -430,7 +471,8 @@ impl Node  {
     }
 
     fn is_next_responsible(&self, key: HashType) -> bool {
-        let succ_id = self.successor.unwrap().id;
+        let succ_rd = self.get_succ();
+        let succ_id = succ_rd.unwrap().id;
         let self_id = self.get_id();
         // Check if the successor node is responsible for the key
         if self_id < succ_id {
@@ -474,7 +516,7 @@ impl Node  {
     // }
 
 impl ConnectionHandler for Node {
-    fn handle_request(&mut self, mut stream: TcpStream) {
+    fn handle_request(&self, mut stream: TcpStream) {
         let peer_addr = stream.peer_addr().unwrap();
         self.print_debug_msg(&format!("New message from {}", peer_addr));
         
@@ -546,4 +588,5 @@ impl ConnectionHandler for Node {
         }
        
     }
+
 }
