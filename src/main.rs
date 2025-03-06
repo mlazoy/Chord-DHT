@@ -8,6 +8,7 @@ use utils::get_local_ip;
 mod utils;
 mod node;
 mod network;
+mod cli;
 
 // Bootsrap node info are globally known 
 const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
@@ -22,7 +23,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 2 {
-        eprintln!("Usage: {} [bootstrap <k> <m> |node]", args[0]);
+        eprintln!("Usage: {} [bootstrap <k> <m> |node| cli <ip_address> <port>]", args[0]);
         return;
     }
 
@@ -80,8 +81,19 @@ fn main() {
 
             node_instance.init();
         }
+
+        "cli" => {
+            if args.len() < 4 {
+                panic!("Usage: cargo run cli <node_ip> <node_port>");
+            }
+            let node_ip = &args[2];
+            let node_port: u16 = args[3].parse().expect("Invalid port");
+
+            println!("Connecting to node at {}:{}...", node_ip, node_port);
+            cli::run_cli(node_ip, node_port);
+        }
         _ => {
-            eprintln!("Usage: {} [bootstrap <k> <m> |node]", args[0]);
+            eprintln!("Usage: {} [bootstrap <k> <m> |node| cli <ip_address> <port>]", args[0]);
         }
     }
 

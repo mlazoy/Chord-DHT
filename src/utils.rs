@@ -113,7 +113,9 @@ pub enum MsgType {
     Quit,
     Insert,
     Delete,
-    Query
+    Query,
+    Overlay,
+    Success
 }
 
 pub fn get_local_ip() -> Ipv4Addr {

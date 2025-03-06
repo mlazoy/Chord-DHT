@@ -220,7 +220,7 @@ impl Node  {
         }
     }
 
-    pub fn quit_ring(&self) {
+    pub fn quit_ring(&self, msg: &Value) {
         self.print_debug_msg("Preparing to Quit...");
         // construct a "Quit" Request Message for previous
         let prev = self.get_prev();
@@ -237,7 +237,7 @@ impl Node  {
         }
         let succ = self.get_succ();
         if let Some(succ_node) = succ{
-                if succ_node.id != self.get_id() {
+            if succ_node.id != self.get_id() {
             // construct a "Quit" Request Message for successor
                 let quit_data_succ = serde_json::json!({
                     "type": MsgType::Quit,
@@ -246,11 +246,11 @@ impl Node  {
                 });
                 succ_node.send_msg(&quit_data_succ.to_string());
                 self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", succ_node));
+                return;
             }
         }
         // close the server and terminate gracefully
         self.set_status(false);
-
     }
 
     fn handle_join(&self, msg:&Value) {
@@ -311,9 +311,10 @@ impl Node  {
                 }
                 // send a compact message with all records
                 self.send_msg(prev_rd, &json!({
+                    "sender": self.get_info(),
                     "type": MsgType::Insert,
                     "id": id,
-                    "records": vec_items        // is serializable
+                    "record": vec_items        // is serializable
                 }).to_string());
 
             } else if self.is_next_responsible(id) {
@@ -402,17 +403,21 @@ impl Node  {
         }
     }
 
-    fn handle_insert(&self, input: &Value) {
-        if input.is_array() {
-            for item in input.as_array().unwrap() {
-                self.insert_aux(item);
+    fn handle_insert(&self, msg: &Value) {
+        if let Some(input) = msg.get("record") {
+            if input.is_array() {
+                for item in input.as_array().unwrap() {
+                    self.insert_aux(item, msg.get("sender"));
+                }
+            } else {
+                self.insert_aux(input, msg.get("sender"));
             }
         } else {
-            self.insert_aux(input);
+            eprintln!("Message doesn't contain record field");
         }
     }
 
-    fn insert_aux(&self, record: &Value) {
+    fn insert_aux(&self, record: &Value, sender: Option<&Value>) {
         // TODO! handle replicas 
         let key = HashFunc(record.get("key").unwrap().as_str().unwrap());
         let title = record.get("title").unwrap().as_str().unwrap().to_string();
@@ -425,8 +430,22 @@ impl Node  {
         if self.is_responsible(key) {
             let mut records = self.records.write().unwrap();
             records.insert(key, item);
+            match serde_json::from_value::<NodeInfo>(sender.unwrap().clone()) {
+                Ok(sender) => {
+                    self.send_msg(
+                        Some(sender)
+                        , &json!({
+                            "type": MsgType::Success,
+                            "msg": "Record inserted successfully"
+                        }).to_string());
+                }
+                Err(e) => {
+                    eprintln!("Failed to deserialize sender info: {}", e);
+                }
+            }
         } else {
             self.send_msg(*self.successor.read().unwrap(), &json!({
+                "sender" : sender.unwrap(),
                 "type": MsgType::Insert,
                 "record": record
             }).to_string());
@@ -569,14 +588,13 @@ impl ConnectionHandler for Node {
                     self.handle_query();
                 }
                 "Insert" => { 
-                   if let Some(record) = msg_value.get("record") {
-                        self.handle_insert(record);
-                    } else {
-                        eprintln!("Received message does not contain a 'record' field.");
-                    }
+                   self.handle_insert(&msg_value);
                 }
                 "Delete" => {
                     self.handle_delete();
+                }
+                "Success" => {
+                    //
                 }
                 _ => {
                     eprintln!("Invalid message type: {}", msg_type);
