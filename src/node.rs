@@ -644,7 +644,7 @@ impl Node  {
     }
 
 
-    fn handle_info(&self, info_msg:&Value) {
+    fn handle_overlay(&self, info_msg:&Value) {
     /* send an Info message to successor in a circular loop 
         until it reaches myself again */
         if let Some(topology) = info_msg.get("topology"){
@@ -662,7 +662,7 @@ impl Node  {
                 } else {
                     ring_list.push(self.get_info());
                     let ring_data = serde_json::json!({
-                        "type": MsgType::Info,
+                        "type": MsgType::Overlay,
                         "topology": ring_list     // serializable ?
                     }); 
             
@@ -673,7 +673,7 @@ impl Node  {
 
     }
 
-    fn get_network(&self) {
+    fn get_overlay(&self) {
         let succ_node = self.get_succ();
         if succ_node.unwrap().id == self.get_id() {
             // node is alone 
@@ -684,7 +684,7 @@ impl Node  {
         let mut netvec : Vec<NodeInfo> = Vec::new();
         netvec.push(self.get_info());
         let ring_data = serde_json::json!({
-            "type": MsgType::Info,
+            "type": MsgType::Overlay,
             "topology": netvec     // serializable ?
         }); 
 
@@ -781,8 +781,8 @@ impl ConnectionHandler for Node {
                 "Delete" => {
                     self.handle_delete(&msg_value);
                 }
-                "Info" => {
-                    self.handle_info(&msg_value);
+                "Overlay" => {
+                    self.handle_overlay(&msg_value);
                 }
                 "Success" => {
                     //
