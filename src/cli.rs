@@ -10,9 +10,10 @@ use crate::node::NodeInfo;
 
 
 /// Sends a request to the node and reads a response.
-fn send_request(ip: &str, port: u16, request: &str) -> Result<String, String> {
+fn send_request(ip: Ipv4Addr, port: u16, request: &str) -> Result<String, String> {
     let address = format!("{}:{}", ip, port);
     let response_port = port + 42;
+    println!("Sending request to {}: {}", address, request);
     let response_address = format!("{}:{}", ip, response_port);
 
     // 🚀 Step 1: Start a listening socket on response_port
@@ -52,7 +53,7 @@ fn send_request(ip: &str, port: u16, request: &str) -> Result<String, String> {
 
 
 /// CLI loop that takes user input, sends requests to the node, and prints responses.
-pub fn run_cli(node_ip: &str, node_port: u16) {
+pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
     loop {
         print!("chordify> ");
         if let Err(_) = io::stdout().flush() {
@@ -69,7 +70,6 @@ pub fn run_cli(node_ip: &str, node_port: u16) {
 
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 let command = parts[0].to_lowercase();
-                let node_ip_addr = Ipv4Addr::from_str(node_ip).unwrap();
                 match command.as_str() {
                     "insert" | "delete" | "query" => {
                         if parts.len() < 2 {
@@ -78,14 +78,13 @@ pub fn run_cli(node_ip: &str, node_port: u16) {
                             continue;
                         }
                         let request = json!({
-                                        "sender": NodeInfo::new(node_ip_addr, node_port + 42),
+                                        "sender": NodeInfo::new(node_ip, node_port + 42),
                                         "type": MsgType::Insert,
                                         "record": {
                                             "title": parts[1],
                                             "key": HashFunc(parts[1]),
                                             "replica_idx": 0
                                         }
-
                                       }).to_string();
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
@@ -101,7 +100,7 @@ pub fn run_cli(node_ip: &str, node_port: u16) {
                         }
                         
                         let request = json!({
-                                        "sender": NodeInfo::new(node_ip_addr, node_port + 42),
+                                        "sender": NodeInfo::new(node_ip, node_port + 42),
                                         "type": MsgType::Delete,
                                         "key": HashFunc(parts[1])
                                       }).to_string();
@@ -119,7 +118,7 @@ pub fn run_cli(node_ip: &str, node_port: u16) {
                         }
 
                         let request = json!({
-                                        "sender": NodeInfo::new(node_ip_addr, node_port + 42),
+                                        "sender": NodeInfo::new(node_ip, node_port + 42),
                                         "type": MsgType::Query,
                                         "key": parts[1]
                                       }).to_string();
@@ -131,7 +130,7 @@ pub fn run_cli(node_ip: &str, node_port: u16) {
 
                     "overlay" => {
                         let request = json!({
-                                        "sender": NodeInfo::new(node_ip_addr, node_port + 42),
+                                        "sender": NodeInfo::new(node_ip, node_port + 42),
                                         "type": MsgType::Overlay
                                       }).to_string();
                         match send_request(node_ip, node_port, &request) {
@@ -142,7 +141,7 @@ pub fn run_cli(node_ip: &str, node_port: u16) {
 
                     "depart" => {
                         let request = json!({
-                                        "sender": NodeInfo::new(node_ip_addr, node_port + 42),
+                                        "sender": NodeInfo::new(node_ip, node_port + 42),
                                         "type": MsgType::Quit
                                       }).to_string();
                         match send_request(node_ip, node_port, &request) {
