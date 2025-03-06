@@ -467,59 +467,86 @@ impl Node  {
     }
 
     fn handle_delete(&self, del_msg:&Value) {
-        if let Some(key) = del_msg.get("key").unwrap().as_str() {
-            let key_hash = HashFunc(key);
+        /* To avoid computing Hash for every replica, use the extra boolean field 'hashed',
+            if hashed true key == hash, else key == title */
+        let key_hash:HashType;
+        if let Some(key) = del_msg.get("key") {
+            if let Some(is_hashed) = del_msg.get("hashed").unwrap().as_bool(){
+                match is_hashed {
+                    true => key_hash = serde_json::from_value::<HashType>(key.clone()).unwrap(),
+                    false => key_hash = HashFunc(key.as_str().unwrap())
+                }
+            // 1. Delete of "genuine" item
             if self.is_responsible(key_hash) {
                 self.records.write().unwrap().remove(&key_hash);
-                // TODO! inform succ to delete replicas
+                if self.replication_factor > 0 {
+                    // delete replicas by forwarding to successor
+                    let del_fw_msg = json!({
+                        "type": MsgType::Delete,
+                        "hashed": true,
+                        "key": key_hash
+                    });
 
+                    self.send_msg(self.get_succ(), &del_fw_msg.to_string());
+                }
                 return;
             }
-            
+
             if self.replication_factor > 0 && self.has_replica(key_hash) {
                     match self.replication_mode {
                         Consistency::Eventual => {
                             /*  Need to check if Delete Request initiated from an intermediate node. 
                                 In this case the message should be delivered to both previous and successor.
-                                Use an extra field forward_back to denote this. */
-                            let mut forward: Option<bool> = None;
-                            match del_msg.get("forward_back") {
-                                Some(fw) => forward = Some(fw.as_bool().unwrap()),
-                                _ => ()
-                            };
+                                Otherwise, delete of a replica must follow only one direction.
+                                Use an extra field forward_back to avoid ping-pong messages. */
+                            let backwards: bool;
+
+                            if !is_hashed { 
+                                backwards = true;   // first backward sender
+                            } else if let Some(back_fw) = del_msg.get("forward_back").unwrap().as_bool() {
+                                    backwards = back_fw;
+                            } else {
+                                backwards = false;
+                            }
                             
                             let mut record_lock = self.records.write().unwrap();
                             if let Some(record) = record_lock.remove(&key_hash){
                                 // removed my replica 
-                                if (forward.is_none() || !forward.unwrap()) && record.replica_idx < self.replication_factor {
-                                    // inform successor
+                                if !backwards && record.replica_idx < self.replication_factor {
+                                    // forward to successor
                                     let del_msg_fw = json!({
                                         "type" : MsgType::Delete,
-                                        "key" : key,   
-                                        "forward_back" : false
+                                        "key" : key_hash,  
+                                        "hashed": true
                                     });
                                     self.send_msg(self.get_succ(), &del_msg_fw.to_string());
                                 }
-                                if (forward.is_none() || forward.unwrap()) && record.replica_idx > 0 {
-                                    // inform previous
+                                if backwards && record.replica_idx > 0 {
+                                    // forward to previous
                                     let del_msg_fw = json!({
                                         "type" : MsgType::Delete,
-                                        "key" : key,   
-                                        "forward_back" : true
+                                        "key" : key_hash,  
+                                        "hashed": true, 
+                                        "forward_back": true
                                     });
                                     self.send_msg(self.get_prev(), &del_msg_fw.to_string());
                                 }
                             }
 
                         }
-                        _ => () // TODO! add linearizability here
+                        Consistency::Chain => {
+                            
+                        }
+
+                        _  => ()
                     }
                 }
 
-                else { // just forward the request
+                else { // just forward the request to either succ or prev depending on hash
                     let del_msg_fw = json!({
                         "type": MsgType::Delete,
-                        "key" : key,
+                        "hashed": true,
+                        "key" : key_hash,
                     });
                     if self.is_next_responsible(key_hash) {
                         self.send_msg(self.get_succ(),&del_msg_fw.to_string());
@@ -527,9 +554,11 @@ impl Node  {
                         self.send_msg(self.get_prev(), &del_msg_fw.to_string());
                     }
                 }
-
+            } else {
+                self.print_debug_msg("'replica' field has errors");
+            }
         } else {
-            self.print_debug_msg("Couldn't parse key value");
+            self.print_debug_msg("Missing key value");
         } 
     }
 
