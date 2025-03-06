@@ -476,7 +476,8 @@ impl Node  {
                     true => key_hash = serde_json::from_value::<HashType>(key.clone()).unwrap(),
                     false => key_hash = HashFunc(key.as_str().unwrap())
                 }
-            // 1. Delete of "genuine" item
+            /* 1. Delete of "genuine" item
+               This step covers all consistency models */
             if self.is_responsible(key_hash) {
                 self.records.write().unwrap().remove(&key_hash);
                 if self.replication_factor > 0 {
@@ -535,7 +536,44 @@ impl Node  {
 
                         }
                         Consistency::Chain => {
-                            
+                            /* If incoming request is from previous node, it means it has been propagated by root, 
+                            so node can proceed to delete replica and forward to successor.
+                            Otherwise it must just forward to previous until it reaches root. 
+                            Use the 'forward_back' field again. */
+                            let backwards: bool;
+
+                            if !is_hashed { 
+                                backwards = true;   // first backward sender
+                            } else if let Some(back_fw) = del_msg.get("forward_back").unwrap().as_bool() {
+                                    backwards = back_fw;
+                            } else {
+                                backwards = false;
+                            }
+
+                            if backwards && self.replication_factor > 0 {
+                                let del_fw_msg = json!({
+                                    "type": MsgType::Delete,
+                                    "hashed": true,
+                                    "key": key_hash,
+                                    "forward_back": true
+                                });
+
+                            self.send_msg(self.get_prev(), &del_fw_msg.to_string());
+                            } else if !backwards {
+                                // now replica can be deleted safely
+                                if let Some(record) = self.records.write().unwrap().remove(&key_hash) {
+                                    // propagate to successor 
+                                    if record.replica_idx < self.replication_factor {
+                                        let del_fw_msg = json!({
+                                            "type": MsgType::Delete,
+                                            "hashed": true,
+                                            "key": key_hash
+                                        });
+
+                                        self.send_msg(self.get_succ(), &del_fw_msg.to_string());
+                                    }
+                                }
+                            }
                         }
 
                         _  => ()
