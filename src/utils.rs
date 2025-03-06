@@ -115,7 +115,8 @@ pub enum MsgType {
     Delete,
     Query,
     Overlay,
-    Success
+    Success,
+    Info            // retrieve topology or size
 }
 
 pub fn get_local_ip() -> Ipv4Addr {

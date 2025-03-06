@@ -22,7 +22,8 @@ pub struct NodeInfo {
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    info: Arc<RwLock<NodeInfo>>,                            // wraps ip, port, status                                  // generated from hash function
+    info: NodeInfo,                                         /* wraps ip, port, id
+                                                            no lock needed - is immutable */                              
     previous : Arc<RwLock<Option<NodeInfo>>>,                  
     successor : Arc<RwLock<Option<NodeInfo>>>, 
     bootstrap : Option<NodeInfo>,                           // no lock because it is read only
@@ -93,7 +94,7 @@ impl Node  {
         };
 
         Node {
-            info: Arc::new(RwLock::new(init_info)),                
+            info: init_info,                
             replication_factor: _k_repl.unwrap_or(0),
             replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
             successor: Arc::new(RwLock::new(None)),
@@ -106,7 +107,7 @@ impl Node  {
 
     pub fn clone (&self) -> Self {
         Node {
-            info: Arc::clone(&self.info),
+            info: self.info,
             previous: Arc::clone(&self.previous),
             successor: Arc::clone(&self.successor),
             bootstrap: self.bootstrap,
@@ -118,19 +119,19 @@ impl Node  {
     }
 
     fn get_id(&self) -> HashType {
-        self.info.read().unwrap().id
+        self.info.id
     }
 
-    fn set_id(&self, id: HashType) {
-        self.info.write().unwrap().id = id;
-    }
+    // fn set_id(&self, id: HashType) {
+    // 
+    // }
 
     fn get_ip(&self) -> Ipv4Addr {
-        self.info.read().unwrap().ip_addr
+        self.info.ip_addr
     }
 
     fn get_port(&self) -> u16 {
-        self.info.read().unwrap().port
+        self.info.port
     }
 
     fn get_status(&self) -> bool {
@@ -158,7 +159,7 @@ impl Node  {
     }
 
     fn get_info(&self) -> NodeInfo {
-        *self.info.read().unwrap()
+        self.info
     }
 
     pub fn init(&self) { 
@@ -457,8 +458,79 @@ impl Node  {
 
     }
 
-    fn handle_delete(&self) {
+    fn has_replica(&self, rec_hash:HashType) -> bool {
+        if let Some(record) = self.records.read().unwrap().get(&rec_hash){
+            if record.replica_idx > 0 { return true; }
+            else { return false; }
+        }
+        false
+    }
 
+    fn handle_delete(&self, del_msg:&Value) {
+        if let Some(key) = del_msg.get("key").unwrap().as_str() {
+            let key_hash = HashFunc(key);
+            if self.is_responsible(key_hash) {
+                self.records.write().unwrap().remove(&key_hash);
+                // TODO! inform succ to delete replicas
+
+                return;
+            }
+            
+            if self.replication_factor > 0 && self.has_replica(key_hash) {
+                    match self.replication_mode {
+                        Consistency::Eventual => {
+                            /*  Need to check if Delete Request initiated from an intermediate node. 
+                                In this case the message should be delivered to both previous and successor.
+                                Use an extra field forward_back to denote this. */
+                            let mut forward: Option<bool> = None;
+                            match del_msg.get("forward_back") {
+                                Some(fw) => forward = Some(fw.as_bool().unwrap()),
+                                _ => ()
+                            };
+                            
+                            let mut record_lock = self.records.write().unwrap();
+                            if let Some(record) = record_lock.remove(&key_hash){
+                                // removed my replica 
+                                if (forward.is_none() || !forward.unwrap()) && record.replica_idx < self.replication_factor {
+                                    // inform successor
+                                    let del_msg_fw = json!({
+                                        "type" : MsgType::Delete,
+                                        "key" : key,   
+                                        "forward_back" : false
+                                    });
+                                    self.send_msg(self.get_succ(), &del_msg_fw.to_string());
+                                }
+                                if (forward.is_none() || forward.unwrap()) && record.replica_idx > 0 {
+                                    // inform previous
+                                    let del_msg_fw = json!({
+                                        "type" : MsgType::Delete,
+                                        "key" : key,   
+                                        "forward_back" : true
+                                    });
+                                    self.send_msg(self.get_prev(), &del_msg_fw.to_string());
+                                }
+                            }
+
+                        }
+                        _ => () // TODO! add linearizability here
+                    }
+                }
+
+                else { // just forward the request
+                    let del_msg_fw = json!({
+                        "type": MsgType::Delete,
+                        "key" : key,
+                    });
+                    if self.is_next_responsible(key_hash) {
+                        self.send_msg(self.get_succ(),&del_msg_fw.to_string());
+                    } else {
+                        self.send_msg(self.get_prev(), &del_msg_fw.to_string());
+                    }
+                }
+
+        } else {
+            self.print_debug_msg("Couldn't parse key value");
+        } 
     }
 
     pub fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &str) -> Option<TcpStream> {
@@ -503,6 +575,55 @@ impl Node  {
             key >= self_id || key <= succ_id
         }
     }
+
+
+    fn handle_info(&self, info_msg:&Value) {
+    /* send an Info message to successor in a circular loop 
+        until it reaches myself again */
+        if let Some(topology) = info_msg.get("topology"){
+            if let Ok(mut ring_list) = serde_json::from_value::<Vec<NodeInfo>>(topology.clone()) {
+                // check head 
+                if ring_list[0].id == self.get_id() {
+                    // circle completed here so print network
+                    print!("RING: ");
+                    // sort just to start from smallest ID
+                    ring_list.sort_by_key(|node| node.id);
+                    for peer in ring_list.iter() {
+                        print!("(id:{}, IP:{}:{}) --> ", peer.id, peer.ip_addr, peer.port);
+                    }
+                    println!("(wrap to start)");
+                } else {
+                    ring_list.push(self.get_info());
+                    let ring_data = serde_json::json!({
+                        "type": MsgType::Info,
+                        "topology": ring_list     // serializable ?
+                    }); 
+            
+                    self.send_msg(self.get_succ(), &ring_data.to_string()); 
+                }
+            }
+        }
+
+    }
+
+    fn get_network(&self) {
+        let succ_node = self.get_succ();
+        if succ_node.unwrap().id == self.get_id() {
+            // node is alone 
+            println!("RING: (id:{}, IP:{}:{})", self.get_id(), self.get_ip(), self.get_port());
+            return;
+        }
+        // simply begins the traversal by adding self
+        let mut netvec : Vec<NodeInfo> = Vec::new();
+        netvec.push(self.get_info());
+        let ring_data = serde_json::json!({
+            "type": MsgType::Info,
+            "topology": netvec     // serializable ?
+        }); 
+
+        self.send_msg(succ_node, &ring_data.to_string());  
+    }
+
 }
 
     // fn get_records(&self, ring_size: usize) {
@@ -591,7 +712,10 @@ impl ConnectionHandler for Node {
                    self.handle_insert(&msg_value);
                 }
                 "Delete" => {
-                    self.handle_delete();
+                    self.handle_delete(&msg_value);
+                }
+                "Info" => {
+                    self.handle_info(&msg_value);
                 }
                 "Success" => {
                     //
