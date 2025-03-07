@@ -3,6 +3,7 @@ use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
+use tokio::net;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::{Read,Write};
 use serde_json::Value;
@@ -40,6 +41,18 @@ impl NodeInfo {
             port,
             id: HashIP(ip_addr, port)
         }
+    }
+
+    pub fn get_id(&self) -> HashType {
+        self.id
+    }
+
+    pub fn get_ip(&self) -> Ipv4Addr {
+        self.ip_addr
+    }
+
+    pub fn get_port(&self) -> u16 {
+        self.port
     }
 
     pub fn send_msg(&self, msg: &str) -> Option<TcpStream> { 
@@ -382,7 +395,7 @@ impl Node  {
         {
             if let (Ok(prev_node), Ok(succ_node)) = 
             (serde_json::from_value::<NodeInfo>(prev_info.clone()), 
-             serde_json::from_value::<NodeInfo>(succ_info.clone())) { // TODO! maybe lock here ?
+             serde_json::from_value::<NodeInfo>(succ_info.clone())) { 
                 self.set_prev(Some(prev_node));
                 self.set_succ(Some(succ_node));
             } else { 
@@ -432,9 +445,10 @@ impl Node  {
         // TODO! handle replicas 
         let key = HashFunc(record.get("key").unwrap().as_str().unwrap());
         let title = record.get("title").unwrap().as_str().unwrap().to_string();
+        let value = record.get("value").unwrap().as_str().unwrap().to_string();
         let item = Item {
             title,
-            key,
+            value,
             replica_idx: 0,
             pending: false      // TODO! change this according to consistency mode
         };
@@ -466,6 +480,14 @@ impl Node  {
     }
 
     fn handle_query(&self, q_msg:&Value) {
+    // extract client connection first 
+    let sender_info: NodeInfo;
+    if let Some(sender) = q_msg.get("sender") {
+        sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+    } else {
+        self.print_debug_msg("couldn't parse client's address");
+        return;
+    }
     /* To avoid computing Hash for every replica, use the extra boolean field 'hashed',
        if hashed true key == hash, else key == title */
         let key_hash:HashType;
@@ -485,9 +507,11 @@ impl Node  {
 
                         let user_msg = json!({
                             "type": MsgType::Reply,
-                            "data": res
+                            "data": (&res.unwrap().title, &res.unwrap().value) // return (key, value) pair
                         });
-                        // TODO! send to cli...
+                        // send to user
+                        sender_info.send_msg(&user_msg.to_string());
+                        return;
                     }
                 }
 
@@ -507,6 +531,7 @@ impl Node  {
                             if record.pending == false {
                                 let q_msg_fw = json!({
                                     "type": MsgType::Query,
+                                    "sender": sender_info,
                                     "hashed": true,
                                     "key": key_hash,
                                     "forward_tail": true
@@ -528,14 +553,17 @@ impl Node  {
                                 // return answer to user 
                                 let user_msg = json!({
                                     "type": MsgType::Reply,
-                                    "data": record
+                                    "data": (&record.title, &record.value)
                                 });
-                                // TODO! send to cli...
+                                // send to user 
+                                sender_info.send_msg(&user_msg.to_string());
+                                return;
                                 
                             } else {
                                 // continue forwarding 
                                 let q_msg_fw = json!({
                                     "type": MsgType::Query,
+                                    "sender": sender_info,
                                     "hashed": true,
                                     "key": key_hash,
                                     "forward_tail": true
@@ -549,6 +577,7 @@ impl Node  {
                     else {
                         let q_msg_fw = json!({
                             "type": MsgType::Query,
+                            "sender": sender_info,
                             "hashed": true,
                             "key": key_hash
                         });
@@ -564,8 +593,8 @@ impl Node  {
                 _ => ()
             }
 
-            } else { self.print_debug_msg("Couldn't parse message: 'hasehd' field is required"); }
-        } else { self.print_debug_msg("Couldn't parse message: 'key' field is missing");}
+            } else { self.print_debug_msg("Couldn't parse message: 'hashed' field is required"); }
+        } else { self.print_debug_msg("Couldn't parse message: 'key' field is missing"); }
     }
 
     fn has_replica(&self, rec_hash:HashType) -> bool {
@@ -577,6 +606,14 @@ impl Node  {
     }
 
     fn handle_delete(&self, del_msg:&Value) {
+        // extract client connection first 
+        let sender_info: NodeInfo;
+        if let Some(sender) = del_msg.get("sender") {
+            sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+        } else {
+            self.print_debug_msg("couldn't parse client's address");
+            return;
+        }
         /* To avoid computing Hash for every replica, use the extra boolean field 'hashed',
             if hashed true key == hash, else key == title */
         let key_hash:HashType;
@@ -589,16 +626,24 @@ impl Node  {
             /* 1. Delete of "genuine" item
                This step covers all consistency models */
             if self.is_responsible(key_hash) {
-                self.records.write().unwrap().remove(&key_hash);
+                let record = self.records.write().unwrap().remove(&key_hash).unwrap();
                 if self.replication_factor > 0 {
                     // delete replicas by forwarding to successor
                     let del_fw_msg = json!({
                         "type": MsgType::Delete,
+                        "sender": sender_info,
                         "hashed": true,
                         "key": key_hash
                     });
 
                     self.send_msg(self.get_succ(), &del_fw_msg.to_string());
+                } else {
+                    let user_msg = json!({
+                        "type": MsgType::Reply,
+                        "data": format!("{} removed successfully!", &record.title)
+                    });
+                    // send to client 
+                    sender_info.send_msg(&user_msg.to_string());
                 }
                 return;
             }
@@ -625,14 +670,16 @@ impl Node  {
                                 // client can be notified immediately in this relaxed model
                                 let user_msg = json!({
                                     "type": MsgType::Reply,
-                                    "data": record
+                                    "data": format!("{} removed successfully!", &record.title)
                                 });
-                                // TODO! send 'Reply' to cli here ...
+                                // send to client 
+                                sender_info.send_msg(&user_msg.to_string());
 
                                 if !backwards && record.replica_idx < self.replication_factor {
                                     // forward to successor
                                     let del_msg_fw = json!({
                                         "type" : MsgType::Delete,
+                                        "sender": sender_info,
                                         "key" : key_hash,  
                                         "hashed": true
                                     });
@@ -642,6 +689,7 @@ impl Node  {
                                     // forward to previous
                                     let del_msg_fw = json!({
                                         "type" : MsgType::Delete,
+                                        "sender": sender_info,
                                         "key" : key_hash,  
                                         "hashed": true, 
                                         "forward_back": true
@@ -669,6 +717,7 @@ impl Node  {
                             if backwards && self.replication_factor > 0 {
                                 let del_fw_msg = json!({
                                     "type": MsgType::Delete,
+                                    "sender": sender_info,
                                     "hashed": true,
                                     "key": key_hash,
                                     "forward_back": true
@@ -682,6 +731,7 @@ impl Node  {
                                     if record.replica_idx < self.replication_factor {
                                         let del_fw_msg = json!({
                                             "type": MsgType::Delete,
+                                            "sender": sender_info,
                                             "hashed": true,
                                             "key": key_hash
                                         });
@@ -692,10 +742,11 @@ impl Node  {
                                         // reached "tail" so can inform client here
                                         let user_msg = json!({
                                             "type": MsgType::Reply,
-                                            "data": record
+                                            "data": format!("{} was removed sucessfully!", &record.title)
                                         });
-                                        // TODO! send msg to client...
-
+                                        // send msg to client
+                                        sender_info.send_msg(&user_msg.to_string());
+                                        return;
                                     }
                                 }
                             }
@@ -708,6 +759,7 @@ impl Node  {
                 else { // just forward the request to either succ or prev depending on hash
                     let del_msg_fw = json!({
                         "type": MsgType::Delete,
+                        "sender": sender_info,
                         "hashed": true,
                         "key" : key_hash,
                     });
@@ -718,7 +770,7 @@ impl Node  {
                     }
                 }
             } else {
-                self.print_debug_msg("'replica' field has errors");
+                self.print_debug_msg("'hashed' field has errors");
             }
         } else {
             self.print_debug_msg("Missing key value");
@@ -761,6 +813,14 @@ impl Node  {
 
 
     fn handle_overlay(&self, info_msg:&Value) {
+    //extract client connection first
+        let sender_info;
+        if let Some(client) = info_msg.get("sender") {
+            sender_info = serde_json::from_value::<NodeInfo>(client.clone()).unwrap();
+        } else {
+            self.print_debug_msg("Couldn't parse client connection");
+            return;
+        }
     /* send an Info message to successor in a circular loop 
         until it reaches myself again */
         if let Some(topology) = info_msg.get("topology"){
@@ -768,17 +828,16 @@ impl Node  {
                 // check head 
                 if ring_list[0].id == self.get_id() {
                     // circle completed here so print network
-                    print!("RING: ");
-                    // sort just to start from smallest ID
-                    ring_list.sort_by_key(|node| node.id);
-                    for peer in ring_list.iter() {
-                        print!("(id:{}, IP:{}:{}) --> ", peer.id, peer.ip_addr, peer.port);
-                    }
-                    println!("(wrap to start)");
+                    let user_msg = json!({
+                        "type":MsgType::Reply,
+                        "data": ring_list
+                    });
+                    sender_info.send_msg(&user_msg.to_string());
                 } else {
                     ring_list.push(self.get_info());
                     let ring_data = serde_json::json!({
                         "type": MsgType::Overlay,
+                        "sender":sender_info,
                         "topology": ring_list     // serializable ?
                     }); 
             
@@ -789,18 +848,32 @@ impl Node  {
 
     }
 
-    fn get_overlay(&self) {
+    fn get_overlay(&self, msg:&Value) {
+        let sender_info;
+        if let Some(client) = msg.get("sender") {
+            sender_info = serde_json::from_value::<NodeInfo>(client.clone()).unwrap();
+        } else {
+            self.print_debug_msg("Couldn't parse client connection");
+            return;
+        }
+        let mut netvec : Vec<NodeInfo> = Vec::new();
+        netvec.push(self.get_info());
+
         let succ_node = self.get_succ();
         if succ_node.unwrap().id == self.get_id() {
             // node is alone 
-            println!("RING: (id:{}, IP:{}:{})", self.get_id(), self.get_ip(), self.get_port());
+            let user_msg = json!({
+                "type":MsgType::Reply,
+                "data":netvec
+            });
+
+            sender_info.send_msg(&user_msg.to_string());
             return;
         }
-        // simply begins the traversal by adding self
-        let mut netvec : Vec<NodeInfo> = Vec::new();
-        netvec.push(self.get_info());
+        // begin the traversal
         let ring_data = serde_json::json!({
             "type": MsgType::Overlay,
+            "sender": sender_info,
             "topology": netvec     // serializable ?
         }); 
 
@@ -929,7 +1002,7 @@ impl ConnectionHandler for Node {
                 }
                 "GetOverlay" => {
                     if self.get_status() {
-                        self.get_overlay();
+                        self.get_overlay(&msg_value);
                     } else {
                         if let Some(sender) = msg_value.get("sender") {
                             let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();

@@ -5,6 +5,8 @@ use std::net::{Ipv4Addr, UdpSocket};
 use hex::{FromHex, ToHex};
 use std::cmp::Ord;
 
+use crate::node::NodeInfo;
+
 /* Simple function to print either success or failure messages on the console
     when running in debug mode */
 pub trait DebugMsg {
@@ -90,7 +92,7 @@ pub fn HashIP(ip_addr: Ipv4Addr, port: u16) -> HashType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub title : String, 
-    pub key : HashType,
+    pub value : String,
     pub replica_idx : usize,
     pub pending : bool,         // used for linearizability acks
 }
@@ -133,4 +135,12 @@ pub fn get_local_ip() -> Ipv4Addr {
     Ipv4Addr::new(127, 0, 0, 1) // Fallback to loopback if something fails
 }
 
-
+pub fn print_network(ring_list:&mut Vec<NodeInfo>) {
+    print!("RING: ");
+    // sort just to start from smallest ID
+    ring_list.sort_by_key(|node| node.get_id());
+    for peer in ring_list.iter() {
+        print!("(id:{}, IP:{}:{}) --> ", peer.get_id(), peer.get_ip(), peer.get_port());
+    }
+    println!("(wrap to start)");
+}
