@@ -71,7 +71,7 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 let command = parts[0].to_lowercase();
                 match command.as_str() {
-                    "insert" | "delete" | "query" => {
+                    "insert" => {
                         if parts.len() < 2 {
                             println!("Usage:");
                             println!("  insert <key> <value>");
@@ -82,7 +82,7 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                                         "type": MsgType::Insert,
                                         "record": {
                                             "title": parts[1],
-                                            "key": HashFunc(parts[1]),
+                                            "value": parts[2],
                                             "replica_idx": 0
                                         }
                                       }).to_string();
@@ -116,7 +116,17 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                             println!("  query [<key> | *]");
                             continue;
                         }
-
+                        if parts[1] == "*" {
+                            let request = json!({
+                                            "sender": NodeInfo::new(node_ip, node_port + 42),
+                                            "type": MsgType::GetQueryAll
+                                          }).to_string();
+                            match send_request(node_ip, node_port, &request) {
+                                Ok(response) => println!("{}", response),
+                                Err(e) => eprintln!("Error: {}", e),
+                            }
+                            continue;
+                        }
                         let request = json!({
                                         "sender": NodeInfo::new(node_ip, node_port + 42),
                                         "type": MsgType::Query,

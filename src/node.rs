@@ -250,7 +250,7 @@ impl Node  {
                         let node_clone = self.clone();
                         thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(1));  // Give time for server setup
-                            node_clone.join_ring();
+                            //node_clone.join_ring();
                         });
             
                         // Keep the main thread alive so the server keeps running
@@ -398,7 +398,6 @@ impl Node  {
                     }
                     // send a compact message with all records
                     self.send_msg(prev_rd, &json!({
-                        "sender": self.get_info(),
                         "type": MsgType::Insert,
                         "id": id,
                         "record": vec_items        // is serializable
@@ -485,9 +484,9 @@ impl Node  {
 
     fn insert_aux(&self, record: &Value, sender: Option<&Value>) {
         // TODO! handle replicas 
-        let key = HashFunc(record.get("key").unwrap().as_str().unwrap());
-        let title = record.get("title").unwrap().as_str().unwrap().to_string();
         let value = record.get("value").unwrap().as_str().unwrap().to_string();
+        let title = record.get("title").unwrap().as_str().unwrap().to_string();
+        let key = HashFunc(&title);
         let item = Item {
             title,
             value,
@@ -640,10 +639,114 @@ impl Node  {
                 _ => ()
             }
 
-            } else { self.print_debug_msg("Couldn't parse message: 'hashed' field is required"); }
-        } else { self.print_debug_msg("Couldn't parse message: 'key' field is missing"); }
+            } else { self.print_debug_msg("Couldn't parse message: 'hasehd' field is required"); }
+        } else { self.print_debug_msg("Couldn't parse message: 'key' field is missing");}
     }
 
+    fn get_query_all(&self, q_msg:&Value) {
+        let mut records_reader = self.records.read().unwrap();
+        let mut res = Vec::new();
+        for (key, item) in records_reader.iter() {
+            if item.replica_idx == 0 && item.pending == false {
+                res.push(item.clone());
+            }
+        }
+
+        let succ_node = self.get_succ();
+        if succ_node.unwrap().id == self.get_id() {
+            // node is alone 
+            let user_msg = json!({
+                "type": MsgType::Reply,
+                "data": res
+            });
+            
+
+            match serde_json::from_value::<NodeInfo>(q_msg.get("sender").unwrap().clone()) {
+                Ok(sender) => {
+                    self.send_msg(
+                        Some(sender)
+                        , &user_msg.to_string());
+                }
+                Err(e) => {
+                    eprintln!("Failed to deserialize sender info: {}", e);
+                }
+            }
+            return;
+        }
+
+        let ring_data = serde_json::json!({
+            "sender": q_msg.get("sender").unwrap(),
+            "start": self.get_id(),
+            "type": MsgType::QueryAll,
+            "data": res     // serializable ?
+        }); 
+
+        self.send_msg(succ_node, &ring_data.to_string()); 
+    }
+
+    fn handle_query_all(&self, q_msg: &Value) {
+        let mut records_reader = self.records.read().unwrap();
+        let mut res = Vec::new();
+    
+        // Collect current node's relevant records
+        for (_, item) in records_reader.iter() {
+            if item.replica_idx == 0 && item.pending == false {
+                res.push(item.clone());
+            }
+        }
+    
+        // Merge received data with local data
+        if let Some(received_data) = q_msg.get("data").and_then(|d| d.as_array()) {
+            for item in received_data {
+                if let Ok(parsed_item) = serde_json::from_value(item.clone()) {
+                    res.push(parsed_item);
+                }
+            }
+        }
+    
+        let succ_node = self.get_succ();
+        if let Some(succ) = succ_node {
+            let start = q_msg.get("start").unwrap();
+            let start_id = serde_json::from_value::<HashType>(start.clone()).unwrap();
+            if succ.id ==  start_id {
+                // If this is the original sender, reply with the accumulated data
+                let user_msg = json!({
+                    "type": MsgType::Reply,
+                    "data": res
+                });
+
+                match serde_json::from_value::<NodeInfo>(q_msg.get("sender").unwrap().clone()) {
+                    Ok(sender) => {
+                        self.send_msg(
+                            Some(sender)
+                            , &user_msg.to_string());
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to deserialize sender info: {}", e);
+                    }
+                }
+            } else {
+                // Otherwise, forward the query along the ring
+                let ring_data = serde_json::json!({
+                    "start": q_msg.get("start").unwrap(),
+                    "sender": q_msg.get("sender").unwrap(),
+                    "type": MsgType::QueryAll,
+                    "data": res
+                });
+    
+                self.send_msg(succ_node, &ring_data.to_string());
+            }
+        }
+    }
+    
+
+    fn has_replica(&self, rec_hash:HashType) -> bool {
+        if let Some(record) = self.records.read().unwrap().get(&rec_hash){
+            if record.replica_idx > 0 { return true; }
+            else { return false; }
+        }
+        false
+    }
 
     fn handle_delete(&self, del_msg:&Value) {
         // extract client connection first 
@@ -990,7 +1093,22 @@ impl ConnectionHandler for Node {
                 "Query" => {
                     self.handle_query(&msg_value);
                 }
-
+                "QueryAll" => {
+                    self.handle_query_all(&msg_value);
+                }
+                "GetQueryAll" => {
+                    if self.get_status() {
+                        self.get_query_all(&msg_value);
+                    } else {
+                        if let Some(sender) = msg_value.get("sender") {
+                            let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+                            sender_info.send_msg(&json!({
+                                "type": MsgType::Reply,
+                                "msg": "Node is not active"
+                            }).to_string());
+                        }
+                    }
+                }
                 "Insert" => { 
                     if self.get_status() {
                         self.handle_insert(&msg_value);

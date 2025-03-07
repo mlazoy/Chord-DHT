@@ -93,6 +93,7 @@ pub fn HashIP(ip_addr: Ipv4Addr, port: u16) -> HashType {
 pub struct Item {
     pub title : String, 
     pub value : String,
+    pub value : String,
     pub replica_idx : usize,
     pub pending : bool,         // used for linearizability acks
 }
@@ -122,7 +123,9 @@ pub enum MsgType {
     Overlay,        // retrieve topology or size
     Reply,          // reply to client
     JoinRing,       // auxiliary for cli
-    GetOverlay      // auxiliary for cli
+    GetOverlay      // auxiliary for cli,
+    QueryAll,
+    GetQueryAll,
 }
 
 pub fn get_local_ip() -> Ipv4Addr {
