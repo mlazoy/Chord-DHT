@@ -11,7 +11,8 @@ mod network;
 mod cli;
 
 // Bootsrap node info are globally known 
-const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
+//const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
+const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(10,0,24,44);  
 const API_PORT: u16 = 8000; 
 const NUM_THREADS: usize = 4;
 

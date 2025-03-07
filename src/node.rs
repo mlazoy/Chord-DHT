@@ -221,16 +221,33 @@ impl Node  {
         }
     }
 
-    pub fn quit_ring(&self, msg: &Value) {
+    pub fn handle_quit(&self, msg: &Value) {
         self.print_debug_msg("Preparing to Quit...");
+        if self.bootstrap.is_none() {
+            let mut reply = "";
+            if self.get_prev().is_none() || self.get_succ().is_none() || self.get_prev().unwrap().id == self.get_id() || self.get_succ().unwrap().id == self.get_id() {
+                self.print_debug_msg("Bootstrap node is alone in the network");
+                self.set_status(false);
+                reply = "Bootstrap node has left the network";
+            } else {
+                reply = "Bootstrap node cannot leave the network, depart the other nodes first";
+            }
+            if let Some(sender) = msg.get("sender") {
+                let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+                sender_info.send_msg(&json!({
+                    "type": MsgType::Reply,
+                    "msg": reply
+                }).to_string());
+            }
+            return;
+        }
         // construct a "Quit" Request Message for previous
         let prev = self.get_prev();
         if let Some(prev_node) = prev {
             if prev_node.id != self.get_id() {
                 let quit_data_prev = serde_json::json!({
-                    "type": MsgType::Quit,
-                    "id": self.get_id(),
-                    "neighbor": prev
+                    "type": MsgType::Update,
+                    "succ_info": self.get_succ()
                 });
                 prev_node.send_msg(&quit_data_prev.to_string());
                 self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", prev_node));
@@ -241,17 +258,22 @@ impl Node  {
             if succ_node.id != self.get_id() {
             // construct a "Quit" Request Message for successor
                 let quit_data_succ = serde_json::json!({
-                    "type": MsgType::Quit,
-                    "id": self.get_id(),
-                    "neighbor": succ
+                    "type": MsgType::Update,
+                    "prev_info": self.get_prev()
                 });
                 succ_node.send_msg(&quit_data_succ.to_string());
                 self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", succ_node));
-                return;
             }
         }
         // close the server and terminate gracefully
         self.set_status(false);
+        if let Some(sender) = msg.get("sender") {
+            let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+            sender_info.send_msg(&json!({
+                "type": MsgType::Reply,
+                "msg": format!("Node {} has left the network", self.get_id())
+            }).to_string());
+        }
     }
 
     fn handle_join(&self, msg:&Value) {
@@ -262,88 +284,88 @@ impl Node  {
                 let id = new_node.id;
                 let peer_port = new_node.port;
                 let peer_ip = new_node.ip_addr;
-            if id == self.get_id() {
-                println!("Node is already part of the network.");
-                return;
-            } 
-            // get a read lock on neighbors
-            let prev_rd = self.get_prev();
-            let succ_rd = self.get_succ();
+                if id == self.get_id() {
+                    println!("Node is already part of the network.");
+                    return;
+                } 
+                // get a read lock on neighbors
+                let prev_rd = self.get_prev();
+                let succ_rd = self.get_succ();
 
-            if self.is_responsible(id) { 
-                self.print_debug_msg(&format!("Sending 'AckJoin' Request to new node {}", peer_ip));
-                let new_node = Some(NodeInfo::new(peer_ip, peer_port));
+                if self.is_responsible(id) { 
+                    self.print_debug_msg(&format!("Sending 'AckJoin' Request to new node {}", peer_ip));
+                    let new_node = Some(NodeInfo::new(peer_ip, peer_port));
 
-                self.send_msg(new_node, &json!({
-                    "type": MsgType::AckJoin,
-                    "prev_info": prev_rd,
-                    "succ_info": self.get_info()
-                }).to_string());
-
-                if !prev_rd.is_none() && self.get_id() != prev_rd.unwrap().id {
-                    self.print_debug_msg(&format!("Sending 'Update' Request to previous node {:?}", prev_rd));
-                    self.send_msg(prev_rd, &json!({
-                        "type": MsgType::Update,
-                        "succ_info": new_node
+                    self.send_msg(new_node, &json!({
+                        "type": MsgType::AckJoin,
+                        "prev_info": prev_rd,
+                        "succ_info": self.get_info()
                     }).to_string());
-                } else {
-                    self.print_debug_msg(&format!("Updating successor locally to {:?}", new_node));
-                    self.set_succ(new_node);
-                }
-                self.set_prev(new_node);
 
-                let mut keys_to_transfer = Vec::new();
-                {
-                    let records_read = self.records.read().unwrap();
-                    for (key, item) in records_read.iter() {
-                        if *key <= id {
-                            keys_to_transfer.push(key.clone());
+                    if !prev_rd.is_none() && self.get_id() != prev_rd.unwrap().id {
+                        self.print_debug_msg(&format!("Sending 'Update' Request to previous node {:?}", prev_rd));
+                        self.send_msg(prev_rd, &json!({
+                            "type": MsgType::Update,
+                            "succ_info": new_node
+                        }).to_string());
+                    } else {
+                        self.print_debug_msg(&format!("Updating successor locally to {:?}", new_node));
+                        self.set_succ(new_node);
+                    }
+                    self.set_prev(new_node);
+
+                    let mut keys_to_transfer = Vec::new();
+                    {
+                        let records_read = self.records.read().unwrap();
+                        for (key, item) in records_read.iter() {
+                            if *key <= id {
+                                keys_to_transfer.push(key.clone());
+                            }
                         }
                     }
-                }
 
-                // Remove and send keys to the new node
-                let mut records_write = self.records.write().unwrap();
-                let mut vec_items: Vec<Item> = Vec::with_capacity(keys_to_transfer.len());
-                for key in keys_to_transfer {
-                    if let Some(item) = records_write.remove(&key) {
-                        vec_items.push(item);
+                    // Remove and send keys to the new node
+                    let mut records_write = self.records.write().unwrap();
+                    let mut vec_items: Vec<Item> = Vec::with_capacity(keys_to_transfer.len());
+                    for key in keys_to_transfer {
+                        if let Some(item) = records_write.remove(&key) {
+                            vec_items.push(item);
+                        }
                     }
+                    // send a compact message with all records
+                    self.send_msg(prev_rd, &json!({
+                        "sender": self.get_info(),
+                        "type": MsgType::Insert,
+                        "id": id,
+                        "record": vec_items        // is serializable
+                    }).to_string());
+
+                } else if self.is_next_responsible(id) {
+                    self.print_debug_msg(&format!("Sending 'Join' Request to successor {}", succ_rd.unwrap().ip_addr));
+                    let new_node = Some(NodeInfo::new(peer_ip, peer_port));
+                    self.send_msg(succ_rd, &json!({
+                        "type": MsgType::Join,
+                        "info": new_node
+                    }).to_string());
+
+                    self.set_succ(new_node);
+
+                } else {
+                    self.print_debug_msg(&format!(
+                        "Forwarding 'Join' Request to successor {:?}", succ_rd
+                    ));
+                    self.send_msg(succ_rd, &json!({
+                        "type": MsgType::Join,
+                        "info": new_node
+                    }).to_string());
                 }
-                // send a compact message with all records
-                self.send_msg(prev_rd, &json!({
-                    "sender": self.get_info(),
-                    "type": MsgType::Insert,
-                    "id": id,
-                    "record": vec_items        // is serializable
-                }).to_string());
-
-            } else if self.is_next_responsible(id) {
-                self.print_debug_msg(&format!("Sending 'Join' Request to successor {}", succ_rd.unwrap().ip_addr));
-                let new_node = Some(NodeInfo::new(peer_ip, peer_port));
-                self.send_msg(succ_rd, &json!({
-                    "type": MsgType::Join,
-                    "info": new_node
-                }).to_string());
-
-                self.set_succ(new_node);
-
-            } else {
+            } else { 
                 self.print_debug_msg(&format!(
-                    "Forwarding 'Join' Request to successor {:?}", succ_rd
-                ));
-                self.send_msg(succ_rd, &json!({
-                    "type": MsgType::Join,
-                    "info": new_node
-                }).to_string());
+                    "Invalid info "
+                )); 
             }
-        } else { 
-            self.print_debug_msg(&format!(
-                "Invalid info "
-            )); 
-        }
-    } 
-}
+        } 
+    }
 
     fn handle_ack_join(&self, ack_msg:&Value) {
         if let (Some(prev_info), Some(succ_info)) = 
@@ -371,36 +393,15 @@ impl Node  {
                     "Invalid info provided for successor node {}", succ_info
                 ));
             }
-        } else {
-            self.print_debug_msg("Message doesn't contain successor node info");
-        }
-    }
-
-    fn handle_quit(&self, msg:&Value) {
-        if let (Some(id), Some(neighbor_info)) = (msg.get("id"), msg.get("neighbor")) {
-            if let (Ok(quit_id), Ok(neighbor_node)) = (serde_json::from_value::<HashType>(id.clone()),
-                serde_json::from_value::<NodeInfo>(neighbor_info.clone())) {
-                // check if it's coming from previous or successor
-                let prev_rd = self.get_prev();
-                if !prev_rd.is_none() && quit_id == prev_rd.unwrap().id {
-                    self.set_prev(Some(neighbor_node));
-                    return;
-                } 
-                let succ_rd = self.get_succ();
-                if !succ_rd.is_none() && quit_id == succ_rd.unwrap().id {
-                    self.set_succ(Some(neighbor_node));
-                    return;
-                } 
-                self.print_debug_msg(&format!(
-                    "Invalid quit message from node: {}", quit_id
-                ));
+        } 
+        if let Some(prev_info) = msg.get("prev_info") {
+            if let Ok(prev_node) = serde_json::from_value::<NodeInfo>(prev_info.clone()) {
+                self.set_prev(Some(prev_node)); 
             } else {
                 self.print_debug_msg(&format!(
-                    "Invalid id or neigbor info provided: {}-{}", id, neighbor_info
+                    "Invalid info provided for previous node {}", prev_info
                 ));
             }
-        } else {
-            self.print_debug_msg("Message doesn't contain either quitting or new neigbor node info");
         }
     }
 
@@ -436,7 +437,7 @@ impl Node  {
                     self.send_msg(
                         Some(sender)
                         , &json!({
-                            "type": MsgType::Success,
+                            "type": MsgType::Reply,
                             "msg": "Record inserted successfully"
                         }).to_string());
                 }
@@ -760,6 +761,16 @@ impl ConnectionHandler for Node {
         if let Some(msg_type) = msg_value.get("type").and_then(Value::as_str) {
             self.print_debug_msg(&format!("Message type: {}", msg_type));
             match msg_type {
+                "JoinRing" => {
+                    self.join_ring();
+                    if let Some(sender) = msg_value.get("sender") {
+                        let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+                        sender_info.send_msg(&json!({
+                            "type": MsgType::Reply,
+                            "msg": "Node joined the ring"
+                        }).to_string());
+                    }
+                }
                 "Join" => {
                     self.handle_join(&msg_value);
                 }
@@ -776,16 +787,46 @@ impl ConnectionHandler for Node {
                     self.handle_query();
                 }
                 "Insert" => { 
-                   self.handle_insert(&msg_value);
+                    if self.get_status() {
+                        self.handle_insert(&msg_value);
+                    } else {
+                        if let Some(sender) = msg_value.get("sender") {
+                            let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+                            sender_info.send_msg(&json!({
+                                "type": MsgType::Reply,
+                                "msg": "Node is not active"
+                            }).to_string());
+                        }
+                    }
                 }
                 "Delete" => {
-                    self.handle_delete(&msg_value);
+                    if self.get_status() {
+                        self.handle_delete(&msg_value);
+                    } else {
+                        if let Some(sender) = msg_value.get("sender") {
+                            let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+                            sender_info.send_msg(&json!({
+                                "type": MsgType::Reply,
+                                "msg": "Node is not active"
+                            }).to_string());
+                        }
+                    }
+                }
+                "GetOverlay" => {
+                    if self.get_status() {
+                        self.get_overlay();
+                    } else {
+                        if let Some(sender) = msg_value.get("sender") {
+                            let sender_info = serde_json::from_value::<NodeInfo>(sender.clone()).unwrap();
+                            sender_info.send_msg(&json!({
+                                "type": MsgType::Reply,
+                                "msg": "Node is not active"
+                            }).to_string());
+                        }
+                    }
                 }
                 "Overlay" => {
                     self.handle_overlay(&msg_value);
-                }
-                "Success" => {
-                    //
                 }
                 _ => {
                     eprintln!("Invalid message type: {}", msg_type);

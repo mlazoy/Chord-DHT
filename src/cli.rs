@@ -29,7 +29,7 @@ fn send_request(ip: Ipv4Addr, port: u16, request: &str) -> Result<String, String
         }
         Err(e) => return Err(format!("Could not connect to node at {}: {}", address, e)),
     }
-`
+
     // 🚀 Step 3: Accept response connection and read response
     match listener.accept() {
         Ok((mut response_stream, _)) => {
@@ -131,7 +131,7 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                     "overlay" => {
                         let request = json!({
                                         "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::Overlay
+                                        "type": MsgType::GetOverlay
                                       }).to_string();
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
@@ -147,8 +147,18 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => {
                                 println!("{}", response);
-                                break;
                             }
+                            Err(e) => eprintln!("Error: {}", e),
+                        }
+                    }
+
+                    "join" => {
+                        let request = json!({
+                                        "sender": NodeInfo::new(node_ip, node_port + 42),
+                                        "type": MsgType::JoinRing
+                                      }).to_string();
+                        match send_request(node_ip, node_port, &request) {
+                            Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),
                         }
                     }
