@@ -184,6 +184,48 @@ impl Node  {
         }
     }
 
+    fn has_replica(&self, rec_hash:HashType) -> bool {
+        if let Some(record) = self.records.read().unwrap().get(&rec_hash){
+            if record.replica_idx > 0 { return true; }
+            else { return false; }
+        }
+        false
+    }
+
+    fn is_responsible(&self, key: HashType) -> bool {
+        // get read locks first 
+        let prev_rd = self.get_prev();
+        let succ_rd = self.get_succ();
+        if prev_rd.is_none() || succ_rd.is_none() {
+            return true;
+        }
+        let prev_id = prev_rd.unwrap().id;
+        let self_id = self.get_id();
+         // Check if this node is responsible for the key
+        if prev_id < self_id {
+            // Normal case: key falls within (prev, self]
+            key > prev_id && key <= self_id
+        } else {
+            // Wrapped case: previous is greater due to ring wrap-around
+            key >= prev_id || key <= self_id
+        }
+    }
+
+    fn is_next_responsible(&self, key: HashType) -> bool {
+        let succ_rd = self.get_succ();
+        let succ_id = succ_rd.unwrap().id;
+        let self_id = self.get_id();
+        // Check if the successor node is responsible for the key
+        if self_id < succ_id {
+            // Normal case: key falls within (self, successor]
+            self.print_debug_msg("Normal case");
+            key > self_id && key <= succ_id
+        } else {
+            // Wrapped case: self is greater due to ring wrap-around
+            key >= self_id || key <= succ_id
+        }
+    }
+
     pub fn init(&self) { 
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
         match TcpListener::bind(sock_addr) {
@@ -479,6 +521,11 @@ impl Node  {
 
     }
 
+    fn handle_ack_insert(&self, ack_msg:&Value) {
+        // used for linearizability only
+        // TODO! just change pending to false and infor previous
+    }
+
     fn handle_query(&self, q_msg:&Value) {
     // extract client connection first 
     let sender_info: NodeInfo;
@@ -597,13 +644,6 @@ impl Node  {
         } else { self.print_debug_msg("Couldn't parse message: 'key' field is missing"); }
     }
 
-    fn has_replica(&self, rec_hash:HashType) -> bool {
-        if let Some(record) = self.records.read().unwrap().get(&rec_hash){
-            if record.replica_idx > 0 { return true; }
-            else { return false; }
-        }
-        false
-    }
 
     fn handle_delete(&self, del_msg:&Value) {
         // extract client connection first 
@@ -777,38 +817,9 @@ impl Node  {
         } 
     }
 
-    fn is_responsible(&self, key: HashType) -> bool {
-        // get read locks first 
-        let prev_rd = self.get_prev();
-        let succ_rd = self.get_succ();
-        if prev_rd.is_none() || succ_rd.is_none() {
-            return true;
-        }
-        let prev_id = prev_rd.unwrap().id;
-        let self_id = self.get_id();
-         // Check if this node is responsible for the key
-        if prev_id < self_id {
-            // Normal case: key falls within (prev, self]
-            key > prev_id && key <= self_id
-        } else {
-            // Wrapped case: previous is greater due to ring wrap-around
-            key >= prev_id || key <= self_id
-        }
-    }
-
-    fn is_next_responsible(&self, key: HashType) -> bool {
-        let succ_rd = self.get_succ();
-        let succ_id = succ_rd.unwrap().id;
-        let self_id = self.get_id();
-        // Check if the successor node is responsible for the key
-        if self_id < succ_id {
-            // Normal case: key falls within (self, successor]
-            self.print_debug_msg("Normal case");
-            key > self_id && key <= succ_id
-        } else {
-            // Wrapped case: self is greater due to ring wrap-around
-            key >= self_id || key <= succ_id
-        }
+    fn handle_ack_delete(&self, ack_msg:&Value) {
+        // used for linearizability only
+        // TODO! implement the physical delete here 
     }
 
 
@@ -959,21 +970,27 @@ impl ConnectionHandler for Node {
                         }).to_string());
                     }
                 }
+
                 "Join" => {
                     self.handle_join(&msg_value);
                 }
+
                 "AckJoin" => {
                     self.handle_ack_join(&msg_value);
                 }
+
                 "Update" => {
                     self.handle_update(&msg_value);
                 }
+
                 "Quit" => {
                     self.handle_quit(&msg_value);
                 }
+
                 "Query" => {
                     self.handle_query(&msg_value);
                 }
+
                 "Insert" => { 
                     if self.get_status() {
                         self.handle_insert(&msg_value);
@@ -987,6 +1004,11 @@ impl ConnectionHandler for Node {
                         }
                     }
                 }
+
+                "AckInsert" => {
+                    // TODO! 
+                }
+
                 "Delete" => {
                     if self.get_status() {
                         self.handle_delete(&msg_value);
@@ -1000,6 +1022,11 @@ impl ConnectionHandler for Node {
                         }
                     }
                 }
+
+                "AckDelete" => {
+                    // TODO!
+                }
+
                 "GetOverlay" => {
                     if self.get_status() {
                         self.get_overlay(&msg_value);
@@ -1013,9 +1040,11 @@ impl ConnectionHandler for Node {
                         }
                     }
                 }
+
                 "Overlay" => {
                     self.handle_overlay(&msg_value);
                 }
+
                 _ => {
                     eprintln!("Invalid message type: {}", msg_type);
                 }

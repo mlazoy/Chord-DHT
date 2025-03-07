@@ -115,13 +115,14 @@ pub enum MsgType {
     AckJoin,
     Quit,
     Insert,
+    AckInsert,      // logical + physical insert 
     Delete,
+    AckDelete,      // logical + physical delete 
     Query,
     Overlay,        // retrieve topology or size
-    Ack,
-    Reply,           // reply to query
-    JoinRing,
-    GetOverlay
+    Reply,          // reply to client
+    JoinRing,       // auxiliary for cli
+    GetOverlay      // auxiliary for cli
 }
 
 pub fn get_local_ip() -> Ipv4Addr {
