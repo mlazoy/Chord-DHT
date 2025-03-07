@@ -162,6 +162,15 @@ impl Node  {
         self.info
     }
 
+    fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &str) -> Option<TcpStream> {
+        if let Some(dest) = dest_node {
+            dest.send_msg(msg)
+        } else {
+            eprintln!("Failed to send message: destination node not found");
+            None
+        }
+    }
+
     pub fn init(&self) { 
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
         match TcpListener::bind(sock_addr) {
@@ -426,7 +435,8 @@ impl Node  {
         let item = Item {
             title,
             key,
-            replica_idx: 0
+            replica_idx: 0,
+            pending: false      // TODO! change this according to consistency mode
         };
 
         if self.is_responsible(key) {
@@ -455,8 +465,107 @@ impl Node  {
 
     }
 
-    fn handle_query(&self) {
+    fn handle_query(&self, q_msg:&Value) {
+    /* To avoid computing Hash for every replica, use the extra boolean field 'hashed',
+       if hashed true key == hash, else key == title */
+        let key_hash:HashType;
+        if let Some(key) = q_msg.get("key") {
+            if let Some(is_hashed) = q_msg.get("hashed").unwrap().as_bool(){
+                match is_hashed {
+                    true => key_hash = serde_json::from_value::<HashType>(key.clone()).unwrap(),
+                    false => key_hash = HashFunc(key.as_str().unwrap())
+                }
 
+            match self.replication_mode {
+                Consistency::Eventual => {
+                    // whoever has a replica can reply
+                    if self.has_replica(key_hash) {
+                        let records_reader = self.records.read().unwrap();
+                        let res = records_reader.get(&key_hash);
+
+                        let user_msg = json!({
+                            "type": MsgType::Reply,
+                            "data": res
+                        });
+                        // TODO! send to cli...
+                    }
+                }
+
+                Consistency::Chain => {
+                /* An insert/delete operation on "head" (can be initiated from intermediate nodes as wel)
+                    followed by a read at the "tail" results in non-linear behaviour. 
+                    To avoid this, reads are blocked until 'pending' field becomes false.
+                    Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
+                    let fw_tail = match q_msg.get("forward_tail").unwrap().as_bool() {
+                        Some(fw) => fw,
+                        _ => false
+                    };
+                    if self.is_responsible(key_hash) {
+                        // check if 'pending' is false and forward to tail
+                        let records_reader = self.records.read().unwrap();
+                        if let Some(record) = records_reader.get(&key_hash){
+                            if record.pending == false {
+                                let q_msg_fw = json!({
+                                    "type": MsgType::Query,
+                                    "hashed": true,
+                                    "key": key_hash,
+                                    "forward_tail": true
+                                });
+
+                                self.send_msg(self.get_succ(), &q_msg_fw.to_string());
+
+                            } else {
+                                // TODO !
+                                // go to sleep and wake up on pending = false ... 
+                            }
+                        }
+                    } 
+                    else if fw_tail {
+                        // check if tail is reached 
+                        let record_reader = self.records.read().unwrap();
+                        if let Some(record) = record_reader.get(&key_hash){
+                            if record.replica_idx == self.replication_factor {
+                                // return answer to user 
+                                let user_msg = json!({
+                                    "type": MsgType::Reply,
+                                    "data": record
+                                });
+                                // TODO! send to cli...
+                                
+                            } else {
+                                // continue forwarding 
+                                let q_msg_fw = json!({
+                                    "type": MsgType::Query,
+                                    "hashed": true,
+                                    "key": key_hash,
+                                    "forward_tail": true
+                                });
+
+                                self.send_msg(self.get_succ(), &q_msg_fw.to_string());
+                            }
+                        }
+
+                    }
+                    else {
+                        let q_msg_fw = json!({
+                            "type": MsgType::Query,
+                            "hashed": true,
+                            "key": key_hash
+                        });
+                        // just forward to head direction
+                        if self.is_next_responsible(key_hash){
+                            self.send_msg(self.get_succ(), &q_msg_fw.to_string());
+                        } else {
+                            self.send_msg(self.get_prev(), &q_msg_fw.to_string());
+                        }
+                    } 
+
+                }
+                _ => ()
+            }
+
+            } else { self.print_debug_msg("Couldn't parse message: 'hasehd' field is required"); }
+        } else { self.print_debug_msg("Couldn't parse message: 'key' field is missing");}
     }
 
     fn has_replica(&self, rec_hash:HashType) -> bool {
@@ -513,7 +622,13 @@ impl Node  {
                             
                             let mut record_lock = self.records.write().unwrap();
                             if let Some(record) = record_lock.remove(&key_hash){
-                                // removed my replica 
+                                // client can be notified immediately in this relaxed model
+                                let user_msg = json!({
+                                    "type": MsgType::Reply,
+                                    "data": record
+                                });
+                                // TODO! send 'Reply' to cli here ...
+
                                 if !backwards && record.replica_idx < self.replication_factor {
                                     // forward to successor
                                     let del_msg_fw = json!({
@@ -572,6 +687,15 @@ impl Node  {
                                         });
 
                                         self.send_msg(self.get_succ(), &del_fw_msg.to_string());
+                                    } 
+                                    else if record.replica_idx == self.replication_factor {
+                                        // reached "tail" so can inform client here
+                                        let user_msg = json!({
+                                            "type": MsgType::Reply,
+                                            "data": record
+                                        });
+                                        // TODO! send msg to client...
+
                                     }
                                 }
                             }
@@ -599,15 +723,6 @@ impl Node  {
         } else {
             self.print_debug_msg("Missing key value");
         } 
-    }
-
-    pub fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &str) -> Option<TcpStream> {
-        if let Some(dest) = dest_node {
-            dest.send_msg(msg)
-        } else {
-            eprintln!("Failed to send message: destination node not found");
-            None
-        }
     }
 
     fn is_responsible(&self, key: HashType) -> bool {
@@ -784,7 +899,7 @@ impl ConnectionHandler for Node {
                     self.handle_quit(&msg_value);
                 }
                 "Query" => {
-                    self.handle_query();
+                    self.handle_query(&msg_value);
                 }
                 "Insert" => { 
                     if self.get_status() {

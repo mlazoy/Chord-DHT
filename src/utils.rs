@@ -91,7 +91,8 @@ pub fn HashIP(ip_addr: Ipv4Addr, port: u16) -> HashType {
 pub struct Item {
     pub title : String, 
     pub key : HashType,
-    pub replica_idx : usize 
+    pub replica_idx : usize,
+    pub pending : bool,         // used for linearizability acks
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
