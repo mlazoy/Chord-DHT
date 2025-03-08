@@ -11,7 +11,7 @@ cargo build
 cargo run bootsrtap <REPLICA_FACTOR> <CONSISTENCY>
 ```
 
-**2.** To start a peer nodes, open a new terminal and type:
+**2.** To start a peer node server, open a new terminal and type:
 ```
 cargo run node
 ```
