@@ -5,13 +5,14 @@ use std::process;
 use serde_json::json;
 use std::str::FromStr;
 
-use crate::messages::JoinMessage;
+use crate::messages::{MsgType,MsgData,Message};
 use crate::utils::*;  
-use crate::node::NodeInfo;  
+use crate::node::{Node, NodeInfo};  
 
 
 /// Sends a request to the node and reads a response.
-fn send_request(ip: Ipv4Addr, port: u16, request: &str) -> Result<String, String> {
+fn send_request(ip: Ipv4Addr, port: u16, request_msg: &Message) -> Result<String, String> {
+    let request = serde_json::json!(request_msg).to_string();
     let address = format!("{}:{}", ip, port);
     let response_port = port + 42;
     println!("Sending request to {}: {}", address, request);
@@ -78,15 +79,12 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                             println!("  insert <key> <value>");
                             continue;
                         }
-                        let request = json!({
-                                        "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::Insert,
-                                        "record": {
-                                            "title": parts[1],
-                                            "value": parts[2],
-                                            "replica_idx": 0
-                                        }
-                                      }).to_string();
+                        let request = Message::new(
+                            MsgType::Insert,
+                            Some(&NodeInfo::new(node_ip, node_port + 42)),
+                            &MsgData::Insert { key: parts[1].to_string(), value: parts[2].to_string() }
+                        );
+                    
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),
@@ -99,12 +97,12 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                             println!("  delete <key>");
                             continue;
                         }
-                        
-                        let request = json!({
-                                        "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::Delete,
-                                        "key": HashFunc(parts[1])
-                                      }).to_string();
+                        let request = Message::new(
+                            MsgType::Delete,
+                            Some(&NodeInfo::new(node_ip, node_port + 42)),
+                            &MsgData::Delete { key: parts[1].to_string() }
+                        );
+    
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),
@@ -117,22 +115,22 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                             println!("  query [<key> | *]");
                             continue;
                         }
+
+                        let request:Message;
+
                         if parts[1] == "*" {
-                            let request = json!({
-                                            "sender": NodeInfo::new(node_ip, node_port + 42),
-                                            "type": MsgType::QueryAll
-                                          }).to_string();
-                            match send_request(node_ip, node_port, &request) {
-                                Ok(response) => println!("{}", response),
-                                Err(e) => eprintln!("Error: {}", e),
-                            }
-                            continue;
+                            request = Message::new(
+                                MsgType::QueryAll,
+                                Some(&NodeInfo::new(node_ip, node_port + 42)),
+                                &MsgData::QueryAll {  }
+                            );
+                        } else {
+                            request = Message::new(
+                                MsgType::Query,
+                                Some(&NodeInfo::new(node_ip, node_port + 42)),
+                                &MsgData::Query{key: parts[1].to_string() }
+                            );
                         }
-                        let request = json!({
-                                        "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::Query,
-                                        "key": parts[1]
-                                      }).to_string();
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),
@@ -140,10 +138,12 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                     }
 
                     "overlay" => {
-                        let request = json!({
-                                        "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::Overlay
-                                      }).to_string();
+                        let request = Message::new(
+                            MsgType::Overlay,
+                            Some(&NodeInfo::new(node_ip, node_port + 42)),
+                            &MsgData::Overlay {  }
+                        );
+                        
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),
@@ -151,10 +151,12 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                     }
 
                     "depart" => {
-                        let request = json!({
-                                        "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::Quit
-                                      }).to_string();
+                        let request = Message::new(
+                            MsgType::Quit,
+                            Some(&NodeInfo::new(node_ip, node_port + 42)),
+                            &MsgData::Quit { id: format!("") } // TODO! 
+                        );
+                        
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => {
                                 println!("{}", response);
@@ -164,11 +166,12 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                     }
 
                     "join" => {
-                        //let request = JoinMessage::new(&NodeInfo::new(node_ip, node_port+42));
-                        let request = json!({
-                            "sender": NodeInfo::new(node_ip, node_port + 42),
-                            "type": MsgType::Quit
-                          }).to_string();
+                        let request = Message::new(
+                            MsgType::Join,
+                            Some(&NodeInfo::new(node_ip, node_port + 42)),
+                            &MsgData::Join { id: format!("") }   // TODO!
+                        );
+                        
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),

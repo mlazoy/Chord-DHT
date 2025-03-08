@@ -173,7 +173,7 @@ impl Node  {
     }
 
     fn insert_aux(&self, key:HashType, new_record: &Item) {
-        self.records.write().unwrap().insert(key, *new_record);
+        self.records.write().unwrap().insert(key, new_record.clone());
     }
 
     fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &Message) -> Option<TcpStream> {
@@ -440,17 +440,36 @@ impl Node  {
     }
 
     fn handle_insert(&self, client:&NodeInfo, data:&MsgData) {
-        // TODO! 
+        match data {
+            MsgData::Insert { key, value } => {
+                let key_hash = HashFunc(key);
+                // TODO !
+            }
+
+            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+        } 
     }
 
     fn handle_fw_insert(&self, client:&NodeInfo, data:&MsgData) {
-        // TODO!
+        match data {
+            MsgData::FwInsert { key, value } => {
+                // TODO!
+
+            }
+            _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
+        }
     }
 
 
     fn handle_ack_insert(&self, data:&MsgData) {
-        // used for linearizability only
-        // TODO! just change pending to false and infor previous
+        /* used for linearizability only
+            change pending to false and inform previous */
+            match data {
+                MsgData::AckInsert { key } => {
+                    // TODO!
+                }
+                _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
+            }
     }
 
     fn handle_query(&self, client:&NodeInfo, data:&MsgData) {
@@ -565,7 +584,12 @@ impl Node  {
     }
 
     fn handle_fw_query(&self, client:&NodeInfo, data:&MsgData) {
-        // TODO!
+        match data {
+            MsgData::FwQuery { key, forward_tail } => {
+                // TODO!
+            }
+            _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
+        }
     }
 
     fn handle_query_all(&self, client:&NodeInfo, data:&MsgData) {
@@ -811,12 +835,36 @@ impl Node  {
     }
 
     fn handle_fw_delete(&self, client:&NodeInfo, data:&MsgData) {
-        // TODO!
+        match data {
+            MsgData::FwDelete { key, forward_back } => {
+                // TODO!
+            }
+            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+        }
     }
 
     fn handle_ack_delete(&self, data:&MsgData) {
-        // used for linearizability only
-        // TODO! implement the physical delete here 
+        /* used for linearizability only
+            implement the physical delete here */
+        match data {
+            MsgData::AckDelete { key } => {
+                let record = self.records.write().unwrap().remove(&key);
+                // inform previous with an ack
+                if let Some(rec) = record {
+                    if rec.replica_idx > 0 {
+                        let fw_ack = Message::new(
+                            MsgType::AckDelete,
+                            None,
+                            &MsgData::AckDelete { key: *key }
+                        );
+                        
+                        self.send_msg(self.get_succ(), &fw_ack);
+                    }
+                }
+            }
+
+            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+        }
     }
 
 
