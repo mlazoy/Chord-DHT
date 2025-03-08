@@ -5,6 +5,7 @@ use std::process;
 use serde_json::json;
 use std::str::FromStr;
 
+use crate::messages::JoinMessage;
 use crate::utils::*;  
 use crate::node::NodeInfo;  
 
@@ -119,7 +120,7 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                         if parts[1] == "*" {
                             let request = json!({
                                             "sender": NodeInfo::new(node_ip, node_port + 42),
-                                            "type": MsgType::GetQueryAll
+                                            "type": MsgType::QueryAll
                                           }).to_string();
                             match send_request(node_ip, node_port, &request) {
                                 Ok(response) => println!("{}", response),
@@ -141,7 +142,7 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                     "overlay" => {
                         let request = json!({
                                         "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::GetOverlay
+                                        "type": MsgType::Overlay
                                       }).to_string();
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
@@ -163,10 +164,11 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                     }
 
                     "join" => {
+                        //let request = JoinMessage::new(&NodeInfo::new(node_ip, node_port+42));
                         let request = json!({
-                                        "sender": NodeInfo::new(node_ip, node_port + 42),
-                                        "type": MsgType::JoinRing
-                                      }).to_string();
+                            "sender": NodeInfo::new(node_ip, node_port + 42),
+                            "type": MsgType::Quit
+                          }).to_string();
                         match send_request(node_ip, node_port, &request) {
                             Ok(response) => println!("{}", response),
                             Err(e) => eprintln!("Error: {}", e),

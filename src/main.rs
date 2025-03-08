@@ -9,6 +9,7 @@ mod utils;
 mod node;
 mod network;
 mod cli;
+mod messages;
 
 // Bootsrap node info are globally known 
 //const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
@@ -72,13 +73,7 @@ fn main() {
                 None, 
                 None,
                 Some(bootstrap_info));
-            
-            // let node_clone = node_instance.clone();
-            // // test departure with a timer 
-            // let _quit_thread = std::thread::spawn(move || {
-            //     std::thread::sleep(std::time::Duration::from_secs(20)); 
-            //     node_clone.quit_ring();  
-            // });
+        
 
             node_instance.init();
         }
