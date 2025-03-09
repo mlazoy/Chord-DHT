@@ -12,7 +12,7 @@ use std::thread;
 use crate::messages::{Message, MsgType, MsgData};
 use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item};
 use crate::network::{ConnectionHandler, Server};
-use crate::NUM_THREADS; 
+use crate::{cli, NUM_THREADS}; 
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -175,9 +175,12 @@ impl Node  {
 
     fn insert_aux(&self, key: HashType, new_record: &Item) {
         let mut record_writer = self.records.write().unwrap();
-        // check if an id already exists and if so just concatenate 'value' field
-        if let Some(exist) = record_writer.get_mut(&key) {  
-            exist.value = format!("{}{}", exist.value, new_record.value);  // Concatenation
+        // check if an id already exists and if so merge item data
+        if let Some(exist) = record_writer.get_mut(&key) { 
+            // Concatenate value 
+            exist.value = format!("{}{}", exist.value, new_record.value);  
+            // perform 'OR' on 'pending' 
+            exist.pending = exist.pending || new_record.pending;
         } else {
             record_writer.insert(key, new_record.clone());  // Insert 
         }
@@ -517,7 +520,40 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        // TODO!
+                        /* Only the primary node can perform the first insertion.
+                           It forwards the insert request to all other replica managers without replying to client.
+                           Meanwhile the 'pending' field remains true until an ack is received. */
+                        if self.is_responsible(&key_hash) {
+                            let new_item = Item{
+                                title: key.clone(),
+                                value: value.clone(),
+                                replica_idx: 0,
+                                pending:true
+                            };
+                            self.insert_aux(key_hash, &new_item);
+
+                            if self.replication_factor > 0 {
+                                let fw_ins = Message::new(
+                                    MsgType::FwInsert,
+                                    client,
+                                    &MsgData::FwInsert { key: key.clone(), value: value.clone(), 
+                                                                replica: 1, forward_back: false }
+                                );
+                                self.send_msg(self.get_succ(), &fw_ins);
+                            }
+                        } else {
+                            let fw_ins = Message::new(
+                                MsgType::Insert,
+                                client,
+                                &MsgData::Insert { key: key.clone(), value: value.clone() }
+                            );
+
+                            if key_hash > self.get_id() {
+                                self.send_msg(self.get_succ(), &fw_ins);
+                            } else {
+                                self.send_msg(self.get_prev(), &fw_ins);
+                            }
+                        }
                     }
 
                     _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
@@ -570,7 +606,42 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        // TODO!
+                        let new_item = Item{
+                            title: key.clone(),
+                            value: value.clone(),
+                            replica_idx: *replica as u8, 
+                            pending: true
+                        };
+                        self.insert_aux(key_hash, &new_item);
+
+                        if (*replica as u8) < self.replication_factor {
+                            let fw_msg = Message::new(
+                                MsgType::FwInsert,
+                                client,
+                                &MsgData::FwInsert { key: key.clone(), value: value.clone(), 
+                                                          replica: *replica + 1, forward_back: false }
+                            );
+
+                            self.send_msg(self.get_succ(), &fw_msg);
+                        } 
+                        else if (*replica as u8) == self.replication_factor {
+                            /* If reached tail reply to client and send an ack to previous node */
+                            let user_msg = Message::new(
+                                MsgType::Reply,
+                                None,
+                                &MsgData::Reply {reply: format!("Inserted ({} : {}) successfully!", new_item.title, new_item.value)}
+                            );
+                            
+                            client.unwrap().send_msg(&user_msg);
+
+                            let ack_msg = Message::new(
+                                MsgType::AckInsert,
+                                None,
+                                &MsgData::AckInsert { key: key_hash }
+                            );
+
+                            self.send_msg(self.get_prev(), &ack_msg);
+                        }
                     }
 
                     _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
@@ -584,10 +655,23 @@ impl Node  {
 
     fn handle_ack_insert(&self, data:&MsgData) {
         /* used for linearizability only
-            change pending to false and inform previous */
+            change 'pending' to false and inform previous */
             match data {
                 MsgData::AckInsert { key } => {
-                    // TODO!
+                    let mut record_writer = self.records.write().unwrap();
+                    if let Some(record) = record_writer.get_mut(&key) {
+                        record.pending = false;
+
+                        if record.replica_idx > 0 {
+                            let fw_ack = Message::new(
+                                MsgType::AckInsert,
+                                None,
+                                &MsgData::AckInsert { key: *key }
+                            );
+
+                            self.send_msg(self.get_prev(), &fw_ack);
+                        }
+                    }
                 }
                 _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
             }
@@ -632,78 +716,64 @@ impl Node  {
                     }
     
                     Consistency::Chain => {
-                    /* An insert/delete operation on "head" (that can be initiated from intermediate nodes as well)
+                    /* An insert/delete operation on "head" or any intermediate node
                         followed by a read at the "tail" results in non-linear behaviour. 
                         To avoid this, reads are blocked until 'pending' field becomes false.
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
-                    //     let fw_tail = match q_msg.get("forward_tail").unwrap().as_bool() {
-                    //         Some(fw) => fw,
-                    //         _ => false
-                    //     };
-                    //     if self.is_responsible(key_hash) {
-                    //         // check if 'pending' is false and forward to tail
-                    //         let records_reader = self.records.read().unwrap();
-                    //         if let Some(record) = records_reader.get(&key_hash){
-                    //             if record.pending == false {
-                    //                 let q_msg_fw = json!({
-                    //                     "type": MsgType::Query,
-                    //                     "sender": sender_info,
-                    //                     "hashed": true,
-                    //                     "key": key_hash,
-                    //                     "forward_tail": true
-                    //                 });
-    
-                    //                 self.send_msg(self.get_succ(), &q_msg_fw.to_string());
-    
-                    //             } else {
-                    //                 // TODO !
-                    //                 // go to sleep and wake up on pending = false ... 
-                    //             }
-                    //         }
-                    //     } 
-                    //     else if fw_tail {
-                    //         // check if tail is reached 
-                    //         let record_reader = self.records.read().unwrap();
-                    //         if let Some(record) = record_reader.get(&key_hash){
-                    //             if record.replica_idx == self.replication_factor {
-                    //                 // return answer to user 
-                    //                 let user_msg = json!({
-                    //                     "type": MsgType::Reply,
-                    //                     "data": (&record.title, &record.value)
-                    //                 });
-                    //                 // send to user 
-                    //                 sender_info.send_msg(&user_msg.to_string());
-                    //                 return;
+
+                        if self.is_responsible(&key_hash) {
+                            let record_reader = self.records.read().unwrap();
+                            let record = record_reader.get(&key_hash);
+                            match record {
+                                Some(exist) => {
+                                    if exist.pending == true {
+                                        // TODO! 
+                                        // go to sleep and wake up on 'pending == false' 
+                                    } 
+                                    if self.replication_factor > 0 {
+                                        let fw_msg = Message::new(
+                                            MsgType::FwQuery,
+                                            client,
+                                            &MsgData::FwQuery { key: key_hash, forward_tail: true }
+                                        );
+
+                                        self.send_msg(self.get_succ(), &fw_msg);
+                                    } else {
+                                        let user_msg = Message::new(
+                                            MsgType::Reply,
+                                            None,
+                                            &MsgData::Reply { reply: format!("Found item ({} : {})", exist.title, exist.value) }
+                                        );
+
+                                        client.unwrap().send_msg(&user_msg);
+                                    }
                                     
-                    //             } else {
-                    //                 // continue forwarding 
-                    //                 let q_msg_fw = json!({
-                    //                     "type": MsgType::Query,
-                    //                     "sender": sender_info,
-                    //                     "hashed": true,
-                    //                     "key": key_hash,
-                    //                     "forward_tail": true
-                    //                 });
-    
-                    //                 self.send_msg(self.get_succ(), &q_msg_fw.to_string());
-                    //             }
-                    //         }
-    
-                    //     }
-                    //     else {
-                    //         let q_msg_fw = json!({
-                    //             "type": MsgType::Query,
-                    //             "sender": sender_info,
-                    //             "hashed": true,
-                    //             "key": key_hash
-                    //         });
-                    //         // just forward to head direction
-                    //         if self.is_next_responsible(key_hash){
-                    //             self.send_msg(self.get_succ(), &q_msg_fw.to_string());
-                    //         } else {
-                    //             self.send_msg(self.get_prev(), &q_msg_fw.to_string());
-                    //         }
-                    //     } 
+                                }
+                                _ => {
+                                    let user_msg = Message::new(
+                                        MsgType::Reply,
+                                        None,
+                                        &MsgData::Reply { reply: format!("Error: Title {} doesn't exist", key) }
+                                    );
+
+                                    client.unwrap().send_msg(&user_msg);
+                                    return;
+                                }
+                            }
+                        }
+                        else {
+                            let fw_query = Message::new(
+                                MsgType::FwQuery,
+                                client,
+                                &MsgData::FwQuery { key:key_hash, forward_tail:false }
+                            ); 
+
+                            if key_hash > self.get_id() {
+                                self.send_msg(self.get_succ(), &fw_query);
+                            } else {
+                                self.send_msg(self.get_prev(), &fw_query);
+                            }
+                        }
     
                     }
                     _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
@@ -752,7 +822,48 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        // TODO !
+                        if *forward_tail == true {
+                            let record_reader = self.records.read().unwrap();
+                            let record = record_reader.get(key);
+                            match record {
+                                Some(exist) => {
+                                    if exist.replica_idx < self.replication_factor {
+                                        let fw_tail = Message::new(
+                                            MsgType::FwQuery,
+                                            client,
+                                            &MsgData::FwQuery { key: *key, forward_tail: true }
+                                        );
+
+                                        self.send_msg(self.get_succ(), &fw_tail);
+                                    } 
+                                    else if exist.replica_idx == self.replication_factor {
+                                        // reached tail so can finally reply to client
+                                        let user_msg = Message::new(
+                                            MsgType::Reply,
+                                            None,
+                                            &MsgData::Reply { reply: format!("Found item ({} : {})", exist.title, exist.value) }
+                                        );
+
+                                        client.unwrap().send_msg(&user_msg);
+                                    }
+                                }
+                                _ => self.print_debug_msg("Error: Wrong Query tail forwarding")
+                            }
+                        }
+                        else {
+                            // continue forwarding in the primary direction
+                            let fw_query = Message::new(
+                                MsgType::FwQuery,
+                                client,
+                                &MsgData::FwQuery { key: *key, forward_tail: false }
+                            );
+
+                            if *key > self.get_id() {
+                                self.send_msg(self.get_succ(), &fw_query);
+                            } else {
+                                self.send_msg(self.get_prev(), &fw_query);
+                            }
+                        }
                     }
 
                     _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
@@ -846,7 +957,11 @@ impl Node  {
                 let key_hash = HashFunc(key);
                 match self.replication_mode {
                     Consistency::Eventual => {
-                        // any replica manager can delete and inform client immediately
+                        /* Any replica manager can delete and inform client immediately.
+                           If delete initiated from an intermediate node, the propagation must 
+                           be delivered to both directions. To avoid ping-pong messaged each 
+                           forwarded message will then follow only one direction, denoted by the 
+                           special field 'forward_back' */
                         if self.is_replica_manager(&key_hash) >= 0 {
                             let res = self.records.write().unwrap().remove(&key_hash);
                             match res {
@@ -858,7 +973,7 @@ impl Node  {
                                     );
                                     client.unwrap().send_msg(&user_msg);
 
-                                    // propagate to other replica managers async
+                                    // propagate to other replica managers if needed (async)
                                     if found.replica_idx < self.replication_factor {
                                         let fw_next = Message::new(
                                             MsgType::FwDelete,
@@ -903,7 +1018,49 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        // TODO!
+                        /* Only the primary node can perform the first 'logical' delete request.
+                            by setting 'pending' to true. Forwarding happens as in insert. */
+                            if self.is_responsible(&key_hash) {
+                                let mut record_writer = self.records.write().unwrap();
+                                let record = record_writer.get_mut(&key_hash);
+                                match record {
+                                    Some(exist) => {
+                                        exist.pending = true;
+                                        if exist.replica_idx < self.replication_factor {
+                                            let fw_del = Message::new(
+                                                MsgType::FwDelete,
+                                                client,
+                                                &MsgData::FwDelete { key: key_hash, forward_back: false }
+                                            );
+                                            self.send_msg(self.get_succ(), &fw_del);
+                                        }
+                                    }
+
+                                    _ => {
+                                        let user_msg = Message::new(
+                                            MsgType::Reply,
+                                            None,
+                                            &MsgData::Reply { reply: format!("Error: {} doesn't exist!", key) }
+                                        );
+
+                                        client.unwrap().send_msg(&user_msg);
+                                        return;
+                                    }
+                                }
+                            }
+                            else {
+                                // just forward to the primary direction
+                                let fw_del = Message::new(
+                                    MsgType::Delete,
+                                    client,
+                                    &MsgData::Delete { key: key.clone() }
+                                );
+                                if key_hash > self.get_id() {
+                                    self.send_msg(self.get_succ(), &fw_del);
+                                } else {
+                                    self.send_msg(self.get_prev(), &fw_del);
+                                }
+                            }
                     }
 
                     _ => self.print_debug_msg(&format!("Unsupported consistency model - {:#?}", self.replication_mode))
@@ -911,159 +1068,6 @@ impl Node  {
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
         }
-        // let key_hash:HashType;
-        // if let Some(key) = del_msg.get("key") {
-        //     if let Some(is_hashed) = del_msg.get("hashed").unwrap().as_bool(){
-        //         match is_hashed {
-        //             true => key_hash = serde_json::from_value::<HashType>(key.clone()).unwrap(),
-        //             false => key_hash = HashFunc(key.as_str().unwrap())
-        //         }
-        //     /* 1. Delete of "genuine" item
-        //        This step covers all consistency models */
-        //     if self.is_responsible(key_hash) {
-        //         let record = self.records.write().unwrap().remove(&key_hash).unwrap();
-        //         if self.replication_factor > 0 {
-        //             // delete replicas by forwarding to successor
-        //             let del_fw_msg = json!({
-        //                 "type": MsgType::Delete,
-        //                 "sender": sender_info,
-        //                 "hashed": true,
-        //                 "key": key_hash
-        //             });
-
-        //             self.send_msg(self.get_succ(), &del_fw_msg.to_string());
-        //         } else {
-        //             let user_msg = json!({
-        //                 "type": MsgType::Reply,
-        //                 "data": format!("{} removed successfully!", &record.title)
-        //             });
-        //             // send to client 
-        //             sender_info.send_msg(&user_msg.to_string());
-        //         }
-        //         return;
-        //     }
-
-        //     if self.replication_factor > 0 && self.has_replica(key_hash) {
-        //             match self.replication_mode {
-        //                 Consistency::Eventual => {
-        //                     /*  Need to check if Delete Request initiated from an intermediate node. 
-        //                         In this case the message should be delivered to both previous and successor.
-        //                         Otherwise, delete of a replica must follow only one direction.
-        //                         Use an extra field forward_back to avoid ping-pong messages. */
-        //                     let backwards: bool;
-
-        //                     if !is_hashed { 
-        //                         backwards = true;   // first backward sender
-        //                     } else if let Some(back_fw) = del_msg.get("forward_back").unwrap().as_bool() {
-        //                             backwards = back_fw;
-        //                     } else {
-        //                         backwards = false;
-        //                     }
-                            
-        //                     let mut record_lock = self.records.write().unwrap();
-        //                     if let Some(record) = record_lock.remove(&key_hash){
-        //                         // client can be notified immediately in this relaxed model
-        //                         let user_msg = json!({
-        //                             "type": MsgType::Reply,
-        //                             "data": format!("{} removed successfully!", &record.title)
-        //                         });
-        //                         // send to client 
-        //                         sender_info.send_msg(&user_msg.to_string());
-
-        //                         if !backwards && record.replica_idx < self.replication_factor {
-        //                             // forward to successor
-        //                             let del_msg_fw = json!({
-        //                                 "type" : MsgType::Delete,
-        //                                 "sender": sender_info,
-        //                                 "key" : key_hash,  
-        //                                 "hashed": true
-        //                             });
-        //                             self.send_msg(self.get_succ(), &del_msg_fw.to_string());
-        //                         }
-        //                         if backwards && record.replica_idx > 0 {
-        //                             // forward to previous
-        //                             let del_msg_fw = json!({
-        //                                 "type" : MsgType::Delete,
-        //                                 "sender": sender_info,
-        //                                 "key" : key_hash,  
-        //                                 "hashed": true, 
-        //                                 "forward_back": true
-        //                             });
-        //                             self.send_msg(self.get_prev(), &del_msg_fw.to_string());
-        //                         }
-        //                     }
-
-        //                 }
-        //                 Consistency::Chain => {
-        //                     /* If incoming request is from previous node, it means it has been propagated by root, 
-        //                     so node can proceed to delete replica and forward to successor.
-        //                     Otherwise it must just forward to previous until it reaches root. 
-        //                     Use the 'forward_back' field again. */
-        //                     let backwards: bool;
-
-        //                     if !is_hashed { 
-        //                         backwards = true;   // first backward sender
-        //                     } else if let Some(back_fw) = del_msg.get("forward_back").unwrap().as_bool() {
-        //                             backwards = back_fw;
-        //                     } else {
-        //                         backwards = false;
-        //                     }
-
-        //                     if backwards && self.replication_factor > 0 {
-        //                         let del_fw_msg = json!({
-        //                             "type": MsgType::Delete,
-        //                             "sender": sender_info,
-        //                             "hashed": true,
-        //                             "key": key_hash,
-        //                             "forward_back": true
-        //                         });
-
-        //                     self.send_msg(self.get_prev(), &del_fw_msg.to_string());
-        //                     } else if !backwards {
-        //                         // now replica can be deleted safely
-        //                         if let Some(record) = self.records.write().unwrap().remove(&key_hash) {
-        //                             // propagate to successor 
-        //                             if record.replica_idx < self.replication_factor {
-        //                                 let del_fw_msg = json!({
-        //                                     "type": MsgType::Delete,
-        //                                     "sender": sender_info,
-        //                                     "hashed": true,
-        //                                     "key": key_hash
-        //                                 });
-
-        //                                 self.send_msg(self.get_succ(), &del_fw_msg.to_string());
-        //                             } 
-        //                             else if record.replica_idx == self.replication_factor {
-        //                                 // reached "tail" so can inform client here
-        //                                 let user_msg = json!({
-        //                                     "type": MsgType::Reply,
-        //                                     "data": format!("{} was removed sucessfully!", &record.title)
-        //                                 });
-        //                                 // send msg to client
-        //                                 sender_info.send_msg(&user_msg.to_string());
-        //                                 return;
-        //                             }
-        //                         }
-        //                     }
-        //                 }
-
-        //                 _  => ()
-        //             }
-        //         }
-
-        //         else { // just forward the request to either succ or prev depending on hash
-        //             let del_msg_fw = json!({
-        //                 "type": MsgType::Delete,
-        //                 "sender": sender_info,
-        //                 "hashed": true,
-        //                 "key" : key_hash,
-        //             });
-        //             if self.is_next_responsible(key_hash) {
-        //                 self.send_msg(self.get_succ(),&del_msg_fw.to_string());
-        //             } else {
-        //                 self.send_msg(self.get_prev(), &del_msg_fw.to_string());
-        //             }
-        //         }
              
     }
 
@@ -1097,7 +1101,48 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        // TODO!
+                        let mut record_writer = self.records.write().unwrap();
+                        let record = record_writer.get_mut(&key);
+                        match record {
+                            Some(exist) => {
+                                exist.pending = true;
+                                if exist.replica_idx < self.replication_factor {
+                                    let fw_del = Message::new(
+                                        MsgType::FwDelete,
+                                        client,
+                                        &MsgData::FwDelete { key: *key, forward_back: false }
+                                    );
+
+                                    self.send_msg(self.get_succ(), &fw_del);
+                                }
+                                else if exist.replica_idx == self.replication_factor {
+                                /* When reach tail: perform first 'physical' delete, reply to client
+                                   and initiate acks to previous nodes */
+                                   self.records.write().unwrap().remove(key);
+
+                                   let user_msg = Message::new(
+                                    MsgType::Reply,
+                                    None,
+                                    &MsgData::Reply { reply: format!("Deleted ({} : {}) successfully!", exist.title, exist.value) }
+                                   );
+
+                                   client.unwrap().send_msg(&user_msg);
+
+                                   if exist.replica_idx > 0 {
+                                    let ack_del = Message::new(
+                                        MsgType::AckDelete,
+                                        None,
+                                        &MsgData::AckDelete { key: *key }
+                                    );
+                                    self.send_msg(self.get_prev(), &ack_del);
+                                    }
+
+                                }
+                            }
+
+                            _ => self.print_debug_msg("Wrong delete forwarding")
+                        }
+                        
                     }
 
                     _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
@@ -1112,18 +1157,27 @@ impl Node  {
             implement the physical delete here */
         match data {
             MsgData::AckDelete { key } => {
-                let record = self.records.write().unwrap().remove(&key);
-                // inform previous with an ack
-                if let Some(rec) = record {
-                    if rec.replica_idx > 0 {
-                        let fw_ack = Message::new(
-                            MsgType::AckDelete,
-                            None,
-                            &MsgData::AckDelete { key: *key }
-                        );
-                        
-                        self.send_msg(self.get_succ(), &fw_ack);
+                let record_reader = self.records.read().unwrap();
+                let record = record_reader.get(&key);
+                match record {
+                    Some(exist) => {
+                        if exist.pending == false {
+                            self.records.write().unwrap().remove(&key);
+                        } else {
+                            self.print_debug_msg("Error: 'logical' delete must occur first");
+                            return;
+                        }
+                        if exist.replica_idx > 0 {
+                            let ack_del = Message::new(
+                                MsgType::AckDelete,
+                                None,
+                                &MsgData::AckDelete { key: *key }
+                            );
+                            
+                            self.send_msg(self.get_prev(), &ack_del);
+                        }
                     }
+                    _ => self.print_debug_msg("Wrong delete ack received"),
                 }
             }
 
