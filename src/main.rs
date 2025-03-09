@@ -39,7 +39,7 @@ fn main() {
             if args.len() < 4 {
                 panic!("Usage: {} bootstrap <k> <m>", args[0]);
             } else {
-                let k: usize = match args[2].parse(){
+                let k: u8 = match args[2].parse(){
                     Ok(val) => val,
                     Err(_) => panic!("Invalid parameter for replication factor: k\n")
                 };

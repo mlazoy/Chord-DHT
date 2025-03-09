@@ -40,7 +40,7 @@ pub enum MsgData {
     Quit { id: String },
     Update { prev_info: Option<NodeInfo>, succ_info: Option<NodeInfo> },
     Insert { key: String, value: String },
-    FwInsert { key: HashType, value: String },
+    FwInsert { key: String, value: String, replica:i16, forward_back:bool },
     AckInsert {key : HashType },
     Delete {key : String },
     FwDelete { key: HashType, forward_back:bool },
@@ -63,9 +63,8 @@ impl Message {
         }
     }
 
-    pub fn extract_client(&self) -> NodeInfo {
-        if self.client.is_none() { panic!("No client provided"); }
-        else { self.client.unwrap() }
+    pub fn extract_client(&self) -> Option<&NodeInfo> {
+        self.client.as_ref()
     }
 
     pub fn extract_type(&self) -> MsgType {

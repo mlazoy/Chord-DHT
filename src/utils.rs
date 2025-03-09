@@ -93,7 +93,7 @@ pub fn HashIP(ip_addr: Ipv4Addr, port: u16) -> HashType {
 pub struct Item {
     pub title : String, 
     pub value : String,
-    pub replica_idx : usize,
+    pub replica_idx : u8,
     pub pending : bool,         // used for linearizability acks
 }
 
