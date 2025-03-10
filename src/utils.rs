@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest,Sha1};
+use std::sync::{Arc, Mutex, Condvar};
 use std::fmt;
 use std::net::{Ipv4Addr, UdpSocket};
 use hex::{FromHex, ToHex};
@@ -94,7 +95,8 @@ pub struct Item {
     pub title : String, 
     pub value : String,
     pub replica_idx : u8,
-    pub pending : bool,         // used for linearizability acks
+    // used for Chain replication to block dirty tail reads
+    pub pending: bool,      
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
