@@ -21,6 +21,13 @@ pub struct NodeInfo {
     id : HashType
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationConfig {
+    replication_factor: u8,
+    replication_mode: Consistency,
+    replica_managers: Vec<HashType>                         // the node ids of which it can holds replicas
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     info: NodeInfo,                                         /* wraps ip, port, id
@@ -28,37 +35,9 @@ pub struct Node {
     previous : Arc<RwLock<Option<NodeInfo>>>,                  
     successor : Arc<RwLock<Option<NodeInfo>>>, 
     bootstrap : Option<NodeInfo>,                           // no lock because it is read only
-    replication_factor : u8,                                // number of replicas per Item
-    replica_managers : Arc<RwLock<Vec<HashType>>>,          // the node ids of which it can holds replicas
-    replication_mode : Consistency,                         // replication mode                
+    replication: Arc<RwLock<ReplicationConfig>>,             // wraps k, m, ids             
     records : Arc<RwLock<BTreeMap<HashType, Item>>>,        // list of hashed records per node
     status: Arc<AtomicBool>                                 // denotes if server is alive
-}
-
-impl fmt::Display for NodeInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "NodeInfo [ ID: {}, IP: {}, Port: {}]",
-            self.id, self.ip_addr, self.port
-        )
-    }
-}
-
-impl fmt::Display for Node {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let prev = self.previous.read().unwrap();
-        let succ = self.successor.read().unwrap();
-        let replicas = self.replica_managers.read().unwrap();
-        let records_count = self.records.read().unwrap().len(); // Only show count for brevity
-
-        write!(
-            f,
-            "Node [\n  {},\n  Previous: {:?},\n  Successor: {:?},\n  
-            Replica Managers: {:?},\n  Records Count: {},\n  Status: {:?}\n]",
-            self.info, *prev, *succ, *replicas, records_count, self.status
-        )
-    }
 }
 
 impl NodeInfo {
@@ -134,16 +113,20 @@ impl Node  {
             port: _port.unwrap_or(0),  
             id : HashIP(*ip, _port.unwrap_or(0)),                                     
         };
+
+        let init_replication = ReplicationConfig {
+            replication_factor: _k_repl.unwrap_or(0),
+            replica_managers: Vec::new(),           
+            replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
+        };
         
 
         Node {
             info: init_info,                
-            replication_factor: _k_repl.unwrap_or(0),
-            replica_managers: Arc::new(RwLock::new(Vec::new())),            
-            replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
             successor: Arc::new(RwLock::new(None)),
             previous: Arc::new(RwLock::new(None)),
             bootstrap: _boot_ref,
+            replication: Arc::new(RwLock::new(init_replication)),
             records: Arc::new(RwLock::new(BTreeMap::new())),
             status: Arc::new(AtomicBool::new(false)) 
         }
@@ -155,9 +138,7 @@ impl Node  {
             previous: Arc::clone(&self.previous),
             successor: Arc::clone(&self.successor),
             bootstrap: self.bootstrap,
-            replication_factor: self.replication_factor,
-            replica_managers: self.replica_managers.clone(),
-            replication_mode: self.replication_mode,
+            replication: self.replication.clone(),
             records: Arc::clone(&self.records),
             status: Arc::clone(&self.status)
         }
@@ -204,7 +185,21 @@ impl Node  {
     }
 
     fn get_replica_managers(&self) -> Vec<HashType> {
-        self.replica_managers.read().unwrap().to_vec()
+        self.replication.read().unwrap().replica_managers.to_vec()
+    }
+
+    fn get_consistency(&self) -> Consistency {
+        self.replication.read().unwrap().replication_mode
+    }
+
+    fn max_replication(&self) -> u8 {
+        self.replication.read().unwrap().replication_factor
+    }
+
+    // dynamically adjusts replication factor when online nodes are less than k
+    fn get_current_k(&self) -> u8 {
+        let k = self.replication.read().unwrap().replication_factor;
+        std::cmp::min(self.get_replica_managers().len() as u8, k)
     }
 
     fn insert_aux(&self, key: HashType, new_record: &Item) {
@@ -273,22 +268,23 @@ impl Node  {
         let replica_managers = self.get_replica_managers();
         let mut idx = replica_managers.len() as i16;
         let mut replicas_iter = replica_managers.iter();
-        let mut prev = replicas_iter.next().unwrap();
-        for curr in replicas_iter {
-            idx -= 1;
-            // normal case 
-            if *prev < *curr {
-                if *key >= *prev && *key < *curr {
-                    return idx;
-                } 
-            } else { // wrap around case 
-                if *key >= *prev || *key < *curr {
-                    return idx;
+        if let Some(mut prev) = replicas_iter.next() {  
+            for curr in replicas_iter {
+                idx -= 1;
+                // Normal case
+                if *prev < *curr {
+                    if *key >= *prev && *key < *curr {
+                        return idx;
+                    }
+                } else { // Wrap-around case
+                    if *key >= *prev || *key < *curr {
+                        return idx;
+                    }
                 }
+                prev = curr;
             }
-            prev = curr;  
         }
-        return -1;
+        -1 
     }
 
     pub fn init(&self) { 
@@ -369,7 +365,7 @@ impl Node  {
                     let mut to_remove = Vec::new();  // Collect keys to remove later
 
                     for (key, item) in records_write.iter_mut() {
-                        if item.replica_idx == self.replication_factor {
+                        if item.replica_idx == self.max_replication() {
                             to_remove.push(key.clone()); 
                         } else if *key <= id {
                             // Update the item
@@ -385,21 +381,28 @@ impl Node  {
                     let mut replica_managers_transferred = self.get_replica_managers();
                     //Update current replica ranges 
                     {
-                        let mut new_replica_managers = self.replica_managers.write().unwrap();
+                        let mut replication_writer = self.replication.write().unwrap();
+                        let new_replica_managers = &mut replication_writer.replica_managers;
                         new_replica_managers.push(id);   // add new node's id
-                        if new_replica_managers.len() == self.replication_factor as usize { 
+                        if new_replica_managers.len() == (self.max_replication() + 1) as usize { 
                             new_replica_managers.remove(0); // pop head
                         } else {
                             replica_managers_transferred.push(self.get_id()); // wrap around
                         }
                     }
 
+                    let replica_config = ReplicationConfig {
+                        replication_factor: self.max_replication(),
+                        replication_mode: self.get_consistency(),
+                        replica_managers: replica_managers_transferred
+                    };
+
                     // send a compact message with new neighbours, all new records and replica managers
                     let ack_msg = Message::new(
                         MsgType::AckJoin,
                         client,
                         &MsgData::AckJoin {  prev_info: prev_rd, succ_info: Some(self.get_info()), 
-                                                  new_items: vec_items, replica_ids : replica_managers_transferred}
+                                                  new_items: vec_items, replica_config: replica_config}
                     );
 
                     self.send_msg(new_node, &ack_msg);
@@ -441,7 +444,7 @@ impl Node  {
     fn handle_ack_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::AckJoin { prev_info, succ_info, 
-                               new_items, replica_ids } => {
+                               new_items, replica_config } => {
                 self.set_prev(*prev_info);
                 self.set_succ(*succ_info);
                 // insert new_items
@@ -449,11 +452,18 @@ impl Node  {
                     let new_key = HashFunc(&item.title);
                     self.insert_aux(new_key, item);
                 }
-                // get replica managers assert vector is empty in this point
-                let mut replica_writer = self.replica_managers.write().unwrap();
-                for id in replica_ids{
-                    replica_writer.push(*id);
-                }
+                
+                {
+                    let mut replication_writer = self.replication.write().unwrap();
+                    replication_writer.replication_factor = replica_config.replication_factor;
+                    replication_writer.replication_mode = replica_config.replication_mode;
+                    // get replica managers assert vector is empty in this point
+                    let manager_writer = &mut replication_writer.replica_managers;
+                    for id in &replica_config.replica_managers{
+                        manager_writer.push(*id);
+                    }
+                } // release locks here
+
                 // change status 
                 self.set_status(true);
                 //inform user
@@ -486,12 +496,13 @@ impl Node  {
                                     item.replica_idx -= 1;
                                 }
                             }
-                        } // drop lock here
+                        } // drop lock here...
+
                         // new keys include only last replicas ...
                         self.print_debug_msg(&format!("Getting new keys {:?}", new_items));
                         if let Some(vec_items) = new_items.as_ref() {
                             for item in vec_items.iter() {
-                                assert!(item.replica_idx == self.replication_factor);
+                                assert!(item.replica_idx == self.get_current_k());
                                 let new_key = HashFunc(&item.title);
                                 self.insert_aux(new_key, item);
                                 self.print_debug_msg(&format!("Inserted item {}-{} sucessfully!", item.title, item.value));
@@ -550,7 +561,7 @@ impl Node  {
                let mut items_transferred = Vec::new();
                let record_reader = self.records.read().unwrap();
                for (_key,item) in record_reader.iter(){
-                if item.replica_idx == self.replication_factor {
+                if item.replica_idx == self.get_current_k() {
                     items_transferred.push(item.clone());
                 }
                }
@@ -578,7 +589,7 @@ impl Node  {
         match data {
             MsgData::Insert { key, value } => {
                 let key_hash = HashFunc(key);
-                match self.replication_mode {
+                match self.get_consistency() {
                     Consistency::Eventual => {
                         /* every replica manager can save the new item loally 
                             and reply to client immediately. */
@@ -611,7 +622,7 @@ impl Node  {
                                 self.send_msg(self.get_prev(), &fw_back);
                             }
 
-                            if (replica as u8) < self.replication_factor {
+                            if (replica as u8) < self.get_current_k() {
                                 // successor's replica_idx += 1
                                 let fw_next = Message::new(
                                     MsgType::FwInsert,
@@ -650,7 +661,7 @@ impl Node  {
                             };
                             self.insert_aux(key_hash, &new_item);
 
-                            if self.replication_factor > 0 {
+                            if self.get_current_k() > 0 {
                                 let fw_ins = Message::new(
                                     MsgType::FwInsert,
                                     client,
@@ -674,7 +685,7 @@ impl Node  {
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
                 }
             }
 
@@ -687,7 +698,7 @@ impl Node  {
             MsgData::FwInsert { key, value, replica, forward_back } => {
                 // forward_back is used to avoid ping-pong messages
                 let key_hash = HashFunc(key);
-                match self.replication_mode {
+                match self.get_consistency() {
                     Consistency::Eventual => {
                         if *replica >= 0 {
                             self.insert_aux(key_hash, &Item { 
@@ -707,7 +718,7 @@ impl Node  {
                                 return;
                             }
 
-                            if (*replica as u8) < self.replication_factor && *forward_back == false {
+                            if (*replica as u8) < self.get_current_k() && *forward_back == false {
                                 let fw_ins = Message::new(
                                     MsgType::FwInsert,
                                     None,
@@ -732,7 +743,7 @@ impl Node  {
                         };
                         self.insert_aux(key_hash, &new_item);
 
-                        if (*replica as u8) < self.replication_factor {
+                        if (*replica as u8) < self.get_current_k() {
                             let fw_msg = Message::new(
                                 MsgType::FwInsert,
                                 client,
@@ -742,7 +753,7 @@ impl Node  {
 
                             self.send_msg(self.get_succ(), &fw_msg);
                         } 
-                        else if (*replica as u8) == self.replication_factor {
+                        else if (*replica as u8) == self.get_current_k() {
                             /* If reached tail reply to client and send an ack to previous node */
                             let user_msg = Message::new(
                                 MsgType::Reply,
@@ -762,7 +773,7 @@ impl Node  {
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
                 }
 
             }
@@ -799,7 +810,7 @@ impl Node  {
         match data {
             MsgData::Query { key } => {
                 let key_hash = HashFunc(key);
-                match self.replication_mode {
+                match self.get_consistency() {
                     Consistency::Eventual => {
                         // whoever has a replica can reply
                         if self.is_replica_manager(&key_hash) >= 0 {
@@ -853,7 +864,7 @@ impl Node  {
                                             continue;
                                         } 
                                         else {
-                                            if exist.replica_idx < self.replication_factor {
+                                            if exist.replica_idx < self.get_current_k() {
                                                 let fw_msg = Message::new(
                                                     MsgType::FwQuery,
                                                     client,
@@ -903,7 +914,7 @@ impl Node  {
                         }
     
                     }
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
                 }
             }
 
@@ -914,7 +925,7 @@ impl Node  {
     fn handle_fw_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwQuery { key, forward_tail } => {
-                match self.replication_mode {
+                match self.get_consistency() {
                     Consistency::Eventual => {
                         // same as Query but hash is pre-computed
                         if self.is_replica_manager(&key) >= 0 {
@@ -954,7 +965,7 @@ impl Node  {
                             let record = record_reader.get(key);
                             match record {
                                 Some(exist) => {
-                                    if exist.replica_idx < self.replication_factor {
+                                    if exist.replica_idx < self.get_current_k() {
                                         let fw_tail = Message::new(
                                             MsgType::FwQuery,
                                             client,
@@ -963,7 +974,7 @@ impl Node  {
 
                                         self.send_msg(self.get_succ(), &fw_tail);
                                     } 
-                                    else if exist.replica_idx == self.replication_factor {
+                                    else if exist.replica_idx == self.get_current_k() {
                                         // reached tail so can finally reply to client
                                         let user_msg = Message::new(
                                             MsgType::Reply,
@@ -993,7 +1004,7 @@ impl Node  {
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
@@ -1097,7 +1108,7 @@ impl Node  {
         match data {
             MsgData::Delete {key} => {
                 let key_hash = HashFunc(key);
-                match self.replication_mode {
+                match self.get_consistency() {
                     Consistency::Eventual => {
                         /* Any replica manager can delete and inform client immediately.
                            If delete initiated from an intermediate node, the propagation must 
@@ -1116,7 +1127,7 @@ impl Node  {
                                     client.unwrap().send_msg(&user_msg);
 
                                     // propagate to other replica managers if needed (async)
-                                    if found.replica_idx < self.replication_factor {
+                                    if found.replica_idx < self.get_current_k() {
                                         let fw_next = Message::new(
                                             MsgType::FwDelete,
                                             None,
@@ -1168,7 +1179,7 @@ impl Node  {
                                 match record {
                                     Some(exist) => {
                                         exist.pending = true;
-                                        if exist.replica_idx < self.replication_factor {
+                                        if exist.replica_idx < self.get_current_k() {
                                             let fw_del = Message::new(
                                                 MsgType::FwDelete,
                                                 client,
@@ -1205,7 +1216,7 @@ impl Node  {
                             }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported consistency model - {:?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported consistency model - {:?}", self.get_consistency()))
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
@@ -1217,7 +1228,7 @@ impl Node  {
         match data {
             MsgData::FwDelete { key, forward_back } => {
                 // forward back is used to avoid ping-pong messages between nodes...
-                match self.replication_mode {
+                match self.get_consistency() {
                     Consistency::Eventual => {
                         if self.is_replica_manager(key) >= 0 {
                             let res = self.records.write().unwrap().remove(key);
@@ -1232,7 +1243,7 @@ impl Node  {
                                         self.send_msg(self.get_prev(), &fw_del);
                                         return;
                                     } 
-                                    if found.replica_idx < self.replication_factor && *forward_back == false {
+                                    if found.replica_idx < self.get_current_k() && *forward_back == false {
                                         self.send_msg(self.get_succ(), &fw_del);
                                         return;
                                     }
@@ -1248,7 +1259,7 @@ impl Node  {
                         match record {
                             Some(exist) => {
                                 exist.pending = true;
-                                if exist.replica_idx < self.replication_factor {
+                                if exist.replica_idx < self.get_current_k() {
                                     let fw_del = Message::new(
                                         MsgType::FwDelete,
                                         client,
@@ -1257,7 +1268,7 @@ impl Node  {
 
                                     self.send_msg(self.get_succ(), &fw_del);
                                 }
-                                else if exist.replica_idx == self.replication_factor {
+                                else if exist.replica_idx == self.get_current_k() {
                                 /* When reach tail: perform first 'physical' delete, reply to client
                                    and initiate acks to previous nodes */
                                    self.records.write().unwrap().remove(key);
@@ -1287,7 +1298,7 @@ impl Node  {
                         
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
@@ -1497,3 +1508,29 @@ impl ConnectionHandler for Node {
         } 
        
     }
+
+impl fmt::Display for NodeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "NodeInfo [ ID: {}, IP: {}, Port: {}]",
+            self.id, self.ip_addr, self.port
+        )
+    }
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let prev = self.previous.read().unwrap();
+        let succ = self.successor.read().unwrap();
+        let replicas = self.replication.read().unwrap();
+        let records_count = self.records.read().unwrap().len(); // Only show count for brevity
+
+        write!(
+            f,
+            "Node [\n  {},\n  Previous: {:?},\n  Successor: {:?},\n  
+            Replica Managers: {:?},\n  Records Count: {},\n  Status: {:?}\n]",
+            self.info, *prev, *succ, replicas.replica_managers, records_count, self.status
+        )
+    }
+}

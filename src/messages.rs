@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::{node::NodeInfo, utils::HashType, utils::Item};
+use crate::{node::{NodeInfo,ReplicationConfig}, utils::HashType, utils::Item};
 
 use serde::{Deserialize,Serialize};
 
@@ -55,7 +55,7 @@ impl fmt::Display for Message {
 pub enum MsgData {
     Join { id: String },
     FwJoin { new_node: NodeInfo },
-    AckJoin { prev_info: Option<NodeInfo>, succ_info : Option<NodeInfo>, new_items:Vec<Item>, replica_ids:Vec<HashType>  },
+    AckJoin { prev_info: Option<NodeInfo>, succ_info : Option<NodeInfo>, new_items:Vec<Item>, replica_config: ReplicationConfig  },
     Quit { id: String },
     Update { prev_info: Option<NodeInfo>, succ_info: Option<NodeInfo>, new_items: Option<Vec<Item>> },
     Insert { key: String, value: String },
@@ -78,8 +78,8 @@ impl fmt::Display for MsgData {
         match self {
             MsgData::Join { id } => write!(f, "{}", id),
             MsgData::FwJoin { new_node } => write!(f, "{}", new_node),
-            MsgData::AckJoin { prev_info, succ_info, new_items, replica_ids } => 
-                write!(f, "{:?}, {:?}, {:?}, {:?}", prev_info, succ_info, new_items, replica_ids),
+            MsgData::AckJoin { prev_info, succ_info, new_items, replica_config } => 
+                write!(f, "{:?}, {:?}, {:?}, {:?}", prev_info, succ_info, new_items, replica_config),
             MsgData::Quit { id } => write!(f, "{}", id),
             MsgData::Update { prev_info, succ_info, new_items } => 
                 write!(f, "{:?}, {:?}, {:?}", prev_info, succ_info, new_items),
