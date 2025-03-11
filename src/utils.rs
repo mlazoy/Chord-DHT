@@ -117,12 +117,27 @@ pub fn get_local_ip() -> Ipv4Addr {
     Ipv4Addr::new(127, 0, 0, 1) // Fallback to loopback if something fails
 }
 
-pub fn print_network(ring_list:&mut Vec<NodeInfo>) {
-    print!("RING: ");
-    // sort just to start from smallest ID
-    ring_list.sort_by_key(|node| node.get_id());
+pub fn format_overlay_msg(ring_list: &Vec<NodeInfo>) -> String {
+    let mut result = String::from("RING: "); 
+    // sort just to start from smallest ID 
+    // -- TODO! do we need this ?
+    //ring_list.sort_by_key(|node| node.get_id());
+
     for peer in ring_list.iter() {
-        print!("(id:{}, IP:{}:{}) --> ", peer.get_id(), peer.get_ip(), peer.get_port());
+        result.push_str(&format!(
+            "(id:{}, IP:{}:{}) --> ", peer.get_id(), peer.get_ip(), peer.get_port()));
     }
-    println!("(wrap to start)");
+    result.push_str("(wrap to start)");
+    result
+}
+
+pub fn format_queryall_msg(items: &Vec<Item>) -> String {
+    let mut result = String::from("ALL RECORDS:\n"); 
+    for (i, item) in items.iter().enumerate() {
+        result.push_str(&format!("({} : {})", item.title, item.value));
+        if i < items.len() - 1 {
+            result.push_str(", "); 
+        }
+    }
+    result
 }

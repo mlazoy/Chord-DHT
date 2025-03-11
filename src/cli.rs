@@ -2,12 +2,10 @@ use std::env;
 use std::io::{self, Write, Read};
 use std::net::{TcpStream, Ipv4Addr, TcpListener};
 use std::process;
-use serde_json::json;
-use std::str::FromStr;
+use serde_json::Value;
 
-use crate::messages::{MsgType,MsgData,Message};
-use crate::utils::*;  
-use crate::node::{Node, NodeInfo};  
+use crate::messages::{MsgType,MsgData,Message}; 
+use crate::node::NodeInfo;  
 
 
 /// Sends a request to the node and reads a response.
@@ -47,7 +45,28 @@ fn send_request(ip: Ipv4Addr, port: u16, request_msg: &Message) -> Result<String
             }
 
             let response_str = String::from_utf8_lossy(&response).to_string();
-            Ok(response_str.trim().to_string()) // Trim to remove newlines
+
+            // 🚀 Step 4: Deserialize and extract only Reply messages
+
+            let json_value: Value = match serde_json::from_str(&response_str) {
+                Ok(value) => value,
+                Err(e) => return Err(format!("Failed to deserialize message: {}", e))
+            };
+    
+            // Convert Value to Message
+            let msg: Message = match serde_json::from_value(json_value) {
+                Ok(msg) => msg,
+                Err(e) => return Err(format!("Failed to convert JSON value to Message: {}", e))
+            };
+            // extract only the data part
+            let msg_data = msg.extract_data();
+
+            match msg_data {
+                MsgData::Reply { reply } => {
+                    Ok(reply)
+                }
+                _ => Err(format!("Unexpected message data"))
+            }
         }
         Err(e) => Err(format!("Failed to accept response connection: {}", e)),
     }
@@ -145,7 +164,9 @@ pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
                         );
                         
                         match send_request(node_ip, node_port, &request) {
-                            Ok(response) => println!("{}", response),
+                            Ok(response) => {
+                                println!("{}", response);
+                            }
                             Err(e) => eprintln!("Error: {}", e),
                         }
                     }

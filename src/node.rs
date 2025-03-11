@@ -1,6 +1,6 @@
 use std::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
 use tokio::net;
@@ -10,9 +10,9 @@ use serde_json::{json,Value};
 use std::thread;
 
 use crate::messages::{Message, MsgType, MsgData};
-use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item};
+use crate::utils::{self, Consistency, DebugMsg, HashFunc, HashIP, HashType, Item};
 use crate::network::{ConnectionHandler, Server};
-use crate::{cli, NUM_THREADS}; 
+use crate::NUM_THREADS; 
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -286,20 +286,27 @@ impl Node  {
         }
     }
 
-    pub fn join_ring(&self) {
-        // construct a "Join" Request Message
+    pub fn join_ring(&self, client:Option<&NodeInfo>) {
+        // forward the Join Request to bootsrap
         self.print_debug_msg("Preparing 'Join' Request...");
-        let join_msg = Message::new(
-            MsgType::FwJoin,
-            None,
-            &MsgData::FwJoin { new_node: self.get_info() } // TODO! replace this with client info
-        );
         if let Some(bootstrap_node) = self.bootstrap {
+            let join_msg = Message::new(
+                MsgType::FwJoin,
+                client,
+                &MsgData::FwJoin { new_node: self.get_info() } 
+            );
             bootstrap_node.send_msg(&join_msg);
-            self.print_debug_msg("Sent 'Join' Request sucessfully");
-        } else {
-            self.print_debug_msg("Cannot locate bootstrap node");
-        }
+        } 
+        else if self.bootstrap.unwrap().id == self.get_id(){
+            // bootstrap node just changes its status
+            self.set_status(true);
+            let user_msg = Message::new(
+                MsgType::Reply,
+                None,
+                &MsgData::Reply { reply: format!("Bootstrap node joined the ring successfully!") }
+            );
+            client.unwrap().send_msg(&user_msg);
+        } 
     }
 
     fn handle_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
@@ -979,7 +986,7 @@ impl Node  {
                     let user_msg = Message::new(
                         MsgType::Reply,
                         None,
-                        &MsgData::Reply { reply: format!("{:#?}", res) }
+                        &MsgData::Reply { reply: utils::format_queryall_msg(&res) }
                     );
                     client.unwrap().send_msg(&user_msg);
                     return;
@@ -1017,7 +1024,7 @@ impl Node  {
                         let user_msg = Message::new(
                             MsgType::Reply,
                             None,
-                            &MsgData::Reply { reply: format!("{:#?}", record_clone) }
+                            &MsgData::Reply { reply: utils::format_queryall_msg(&record_clone)}
                         );
                         client.unwrap().send_msg(&user_msg);
                     }
@@ -1285,7 +1292,7 @@ impl Node  {
                     let user_msg = Message::new (
                         MsgType::Reply,
                         None,
-                        &MsgData::Reply { reply: format!("{:#?}", peers)}
+                        &MsgData::Reply { reply: utils::format_overlay_msg(&peers)}
                     );
                     client.unwrap().send_msg(&user_msg);
                 } else {
@@ -1319,7 +1326,7 @@ impl Node  {
                     let user_msg = Message::new(
                         MsgType::Reply,
                         None,
-                        &MsgData::Reply{ reply: format!("{:#?}", netvec)}
+                        &MsgData::Reply{ reply: utils::format_overlay_msg(&netvec)}
                     );
 
                     client.unwrap().send_msg(&user_msg);
@@ -1345,12 +1352,12 @@ impl ConnectionHandler for Node {
         let peer_addr = stream.peer_addr().unwrap();
         self.print_debug_msg(&format!("New message from {}", peer_addr));
         
-        let peer_ip: Ipv4Addr = match peer_addr.ip() {
-            std::net::IpAddr::V4(ipv4) => ipv4,  // Extract IPv4
-            std::net::IpAddr::V6(_) => {
-                panic!("Received IPv6 address, expected only IPv4");
-            }
-        };
+        // let peer_ip: Ipv4Addr = match peer_addr.ip() {
+        //     std::net::IpAddr::V4(ipv4) => ipv4,  // Extract IPv4
+        //     std::net::IpAddr::V6(_) => {
+        //         panic!("Received IPv6 address, expected only IPv4");
+        //     }
+        // };
                     
         let mut buffer = [0; 1024]; 
         let n = match stream.read(&mut buffer) {
@@ -1386,18 +1393,23 @@ impl ConnectionHandler for Node {
             let msg_type = msg.extract_type();
             let msg_data = msg.extract_data();
 
-            if !self.get_status() {
-                let error_msg = Message::new(
-                    MsgType::Reply,
-                    None,
-                    &MsgData::Reply { reply: format!("Node is offline")}
-                );
-                sender_info.unwrap().send_msg(&error_msg);
-                return; 
+            match msg_type {
+                MsgType::Join => (),
+                _ => {
+                    if !self.get_status() {
+                        let error_msg = Message::new(
+                            MsgType::Reply,
+                            None,
+                            &MsgData::Reply { reply: format!("Node is offline")}
+                        );
+                        sender_info.unwrap().send_msg(&error_msg);
+                        return; 
+                    }
+                }
             }
 
             match msg_type {
-                MsgType::Join => self.join_ring(),
+                MsgType::Join => self.join_ring(sender_info),
                 
                 MsgType::FwJoin => self.handle_join(sender_info, &msg_data),
                 
