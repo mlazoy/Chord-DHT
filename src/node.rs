@@ -298,7 +298,6 @@ impl Node  {
                 if self.bootstrap.is_none() {
                     self.set_prev(Some(self.get_info()));
                     self.set_succ(Some(self.get_info()));
-                    self.set_status(true);
                 }
                 let node_server = Server::new(self.clone());
                 self.set_status(true);
@@ -455,6 +454,8 @@ impl Node  {
                 for id in replica_ids{
                     replica_writer.push(*id);
                 }
+                // change status 
+                self.set_status(true);
                 //inform user
                 let user_msg = Message::new(
                     MsgType::Reply,
@@ -474,30 +475,34 @@ impl Node  {
                 if !prev_info.is_none() {
                     self.set_prev(*prev_info);
                     self.print_debug_msg(&format!("Updated 'previous' to {}", prev_info.unwrap()));
+
+                    // in case of quit, decrement replica indices first and then get new keys 
+                    if !new_items.is_none() {
+                        {
+                            let mut records_write = self.records.write().unwrap();
+
+                            for (_key, item) in records_write.iter_mut() {
+                                if item.replica_idx > 0 {
+                                    item.replica_idx -= 1;
+                                }
+                            }
+                        } // drop lock here
+                        // new keys include only last replicas ...
+                        self.print_debug_msg(&format!("Getting new keys {:?}", new_items));
+                        if let Some(vec_items) = new_items.as_ref() {
+                            for item in vec_items.iter() {
+                                assert!(item.replica_idx == self.replication_factor);
+                                let new_key = HashFunc(&item.title);
+                                self.insert_aux(new_key, item);
+                                self.print_debug_msg(&format!("Inserted item {}-{} sucessfully!", item.title, item.value));
+                            }
+                        }
+                    }
                 }
 
                 if !succ_info.is_none() {
                     self.set_succ(*succ_info);
                     self.print_debug_msg(&format!("Updated 'successor' to {}", succ_info.unwrap()));
-
-                    // in case of quit, decrement replica indices first and then get new keys 
-                    if !new_items.is_none() {
-                        let mut records_write = self.records.write().unwrap();
-
-                        for (_key, item) in records_write.iter_mut() {
-                            if item.replica_idx > 0 {
-                                item.replica_idx -= 1;
-                            }
-                        }
-                    }
-                    // new keys include only last replicas ...
-                    if let Some(vec_items) = new_items.as_ref() {
-                        for item in vec_items.iter() {
-                            assert!(item.replica_idx == self.replication_factor);
-                            let new_key = HashFunc(&item.title);
-                            self.insert_aux(new_key, item);
-                        }
-                    }
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
@@ -589,7 +594,7 @@ impl Node  {
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
-                                &MsgData::Reply { reply: format!("Inserted({} : {}) successfully!", key, value) }
+                                &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", key, value) }
                             );
                             client.unwrap().send_msg(&user_msg);
 
@@ -742,7 +747,7 @@ impl Node  {
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
-                                &MsgData::Reply {reply: format!("Inserted ({} : {}) successfully!", new_item.title, new_item.value)}
+                                &MsgData::Reply {reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", new_item.title, new_item.value)}
                             );
                             
                             client.unwrap().send_msg(&user_msg);
@@ -801,8 +806,8 @@ impl Node  {
                             let records_reader = self.records.read().unwrap();
                             let res = records_reader.get(&key_hash);
                             let reply: &str = match res {
-                                Some(found) => &format!("Found data: ({},{})", found.title, found.value),
-                                _ => &format!("Error: {} doesn't exist", key)
+                                Some(found) => &format!("Found data: (🔑 {} : 🔒{})", found.title, found.value),
+                                _ => &format!("Error: 🔑{} doesn't exist", key)
                             };
                             
                             let user_msg = Message::new(
@@ -861,7 +866,7 @@ impl Node  {
                                                 let user_msg = Message::new(
                                                     MsgType::Reply,
                                                     None,
-                                                    &MsgData::Reply { reply: format!("Found item ({} : {})", exist.title, exist.value) }
+                                                    &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                                 );
 
                                                 client.unwrap().send_msg(&user_msg);
@@ -874,7 +879,7 @@ impl Node  {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Error: Title {} doesn't exist", key) }
+                                            &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg);
@@ -916,7 +921,7 @@ impl Node  {
                             let records_reader = self.records.read().unwrap();
                             let res = records_reader.get(&key);
                             let reply: &str = match res {
-                                Some(found) => &format!("Found item ({} : {})", found.title, found.value),
+                                Some(found) => &format!("Found (🔑 {} : 🔒{})", found.title, found.value),
                                 _ => &format!("Error: {} doesn't exist", key)
                             };
                             
@@ -963,7 +968,7 @@ impl Node  {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Found item ({} : {})", exist.title, exist.value) }
+                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg);
@@ -1000,6 +1005,14 @@ impl Node  {
             MsgData::QueryAll {  } => {
                 let records_reader = self.records.read().unwrap();
                 let mut res = Vec::new();
+                // works as barrier for printing items per node
+                let node_item = Item{
+                    title: format!("__nodeID__"),
+                    value: self.get_id().to_string(),
+                    pending:false,
+                    replica_idx:0
+                };
+                res.push(node_item);
                 for (_key, item) in records_reader.iter() {
                     if item.replica_idx == 0 && item.pending == false {
                         res.push(item.clone());
@@ -1035,7 +1048,14 @@ impl Node  {
             MsgData::FwQueryAll { record_list, header } => {
                 let records_reader = self.records.read().unwrap();
                 let mut record_clone = record_list.clone();
-            
+                // works as barrier for printing items per node
+                let node_item = Item{
+                    title: format!("__nodeID__"),
+                    value: self.get_id().to_string(),
+                    pending:false,
+                    replica_idx:0
+                };
+                record_clone.push(node_item);
                 // Append current node's relevant records
                 for (_, item) in records_reader.iter() {
                     if item.replica_idx == 0 && item.pending == false {
@@ -1091,7 +1111,7 @@ impl Node  {
                                     let user_msg = Message::new(
                                         MsgType::Reply,
                                         None,
-                                        &MsgData::Reply { reply: format!("Deleted ({} : {}) sucessfully!", found.title, found.value) }
+                                        &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) sucessfully!", found.title, found.value) }
                                     );
                                     client.unwrap().send_msg(&user_msg);
 
@@ -1118,7 +1138,7 @@ impl Node  {
                                     let user_msg =Message::new(
                                         MsgType::Reply,
                                         None,
-                                        &MsgData::Reply { reply: format!("Error: Title {} doesn't exist!", key) }
+                                        &MsgData::Reply { reply: format!("Error: Title 🔑 {} doesn't exist!", key) }
                                     );
                                     client.unwrap().send_msg(&user_msg);
                                 }
@@ -1162,7 +1182,7 @@ impl Node  {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Error: {} doesn't exist!", key) }
+                                            &MsgData::Reply { reply: format!("Error: 🔑 {} doesn't exist!", key) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg);
@@ -1245,7 +1265,7 @@ impl Node  {
                                    let user_msg = Message::new(
                                     MsgType::Reply,
                                     None,
-                                    &MsgData::Reply { reply: format!("Deleted ({} : {}) successfully!", exist.title, exist.value) }
+                                    &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) successfully!", exist.title, exist.value) }
                                    );
 
                                    client.unwrap().send_msg(&user_msg);

@@ -1,7 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest,Sha1};
-use std::hash::Hash;
-use std::sync::{Arc, Mutex, Condvar};
 use std::fmt;
 use std::net::{Ipv4Addr, UdpSocket};
 use hex::{FromHex, ToHex};
@@ -125,25 +123,26 @@ pub fn get_local_ip() -> Ipv4Addr {
 }
 
 pub fn format_overlay_msg(ring_list: &Vec<NodeInfo>) -> String {
-    let mut result = String::from("RING: "); 
+    let mut result = String::from("***************\nRING OVERLAY🔗\n***************\n"); 
     // sort just to start from smallest ID 
     // -- TODO! do we need this ?
     //ring_list.sort_by_key(|node| node.get_id());
 
     for peer in ring_list.iter() {
         result.push_str(&format!(
-            "(id:{}, IP:{}:{}) --> ", peer.get_id(), peer.get_ip(), peer.get_port()));
+            "(nodeID:{}, IP:{}:{}) ↔️ \n ", peer.get_id(), peer.get_ip(), peer.get_port()));
     }
-    result.push_str("(wrap to start)");
+    result.push_str("🔄");
     result
 }
 
 pub fn format_queryall_msg(items: &Vec<Item>) -> String {
-    let mut result = String::from("ALL RECORDS:\n"); 
-    for (i, item) in items.iter().enumerate() {
-        result.push_str(&format!("({} : {})", item.title, item.value));
-        if i < items.len() - 1 {
-            result.push_str(", "); 
+    let mut result = String::from("****************\nALL RECORDS⭐\n****************\n"); 
+    for item in items.iter() {
+        if item.title == "__nodeID__" {
+            result.push_str(&format!("\n📋Node: {} \n", item.value));
+        } else {
+        result.push_str(&format!("(🔑{} : 🔒{})\n", item.title, item.value));
         }
     }
     result
