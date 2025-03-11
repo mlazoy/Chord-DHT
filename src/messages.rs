@@ -36,9 +36,9 @@ pub struct Message {
 pub enum MsgData {
     Join { id: String },
     FwJoin { new_node: NodeInfo },
-    AckJoin { prev_info: Option<NodeInfo>, succ_info : Option<NodeInfo>, new_items:Vec<Item>, replica_range:Vec<HashType>  },
+    AckJoin { prev_info: Option<NodeInfo>, succ_info : Option<NodeInfo>, new_items:Vec<Item>, replica_ids:Vec<HashType>  },
     Quit { id: String },
-    Update { prev_info: Option<NodeInfo>, succ_info: Option<NodeInfo> },
+    Update { prev_info: Option<NodeInfo>, succ_info: Option<NodeInfo>, new_items: Option<Vec<Item>> },
     Insert { key: String, value: String },
     FwInsert { key: String, value: String, replica:i16, forward_back:bool },
     AckInsert {key : HashType },

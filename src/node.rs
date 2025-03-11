@@ -29,7 +29,7 @@ pub struct Node {
     successor : Arc<RwLock<Option<NodeInfo>>>, 
     bootstrap : Option<NodeInfo>,                           // no lock because it is read only
     replication_factor : u8,                                // number of replicas per Item
-    replicas_range : Vec<HashType>,                         // the node ids of which it can holds replicas
+    replica_managers : Arc<RwLock<Vec<HashType>>>,          // the node ids of which it can holds replicas
     replication_mode : Consistency,                         // replication mode                
     records : Arc<RwLock<BTreeMap<HashType, Item>>>,        // list of hashed records per node
     status: Arc<AtomicBool>                                 // denotes if server is alive
@@ -113,7 +113,7 @@ impl Node  {
         Node {
             info: init_info,                
             replication_factor: _k_repl.unwrap_or(0),
-            replicas_range: Vec::new(),            
+            replica_managers: Arc::new(RwLock::new(Vec::new())),            
             replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
             successor: Arc::new(RwLock::new(None)),
             previous: Arc::new(RwLock::new(None)),
@@ -130,7 +130,7 @@ impl Node  {
             successor: Arc::clone(&self.successor),
             bootstrap: self.bootstrap,
             replication_factor: self.replication_factor,
-            replicas_range: self.replicas_range.clone(),
+            replica_managers: self.replica_managers.clone(),
             replication_mode: self.replication_mode,
             records: Arc::clone(&self.records),
             status: Arc::clone(&self.status)
@@ -175,6 +175,10 @@ impl Node  {
 
     fn get_info(&self) -> NodeInfo {
         self.info
+    }
+
+    fn get_replica_managers(&self) -> Vec<HashType> {
+        self.replica_managers.read().unwrap().to_vec()
     }
 
     fn insert_aux(&self, key: HashType, new_record: &Item) {
@@ -236,8 +240,13 @@ impl Node  {
     fn is_replica_manager(&self, key:&HashType) -> i16 {
         /* returns the corresponding replica_idx if it is a replica manager 
             otherwise -1 */
-        let mut idx = self.replicas_range.len() as i16;
-        let mut replicas_iter = self.replicas_range.iter();
+        if self.is_responsible(key) {
+            return 0;
+        }
+        // check if node[i].id <= key < node[j].id, forall i < j
+        let replica_managers = self.get_replica_managers();
+        let mut idx = replica_managers.len() as i16;
+        let mut replicas_iter = replica_managers.iter();
         let mut prev = replicas_iter.next().unwrap();
         for curr in replicas_iter {
             idx -= 1;
@@ -293,62 +302,6 @@ impl Node  {
         }
     }
 
-    pub fn handle_quit(&self, client:Option<&NodeInfo>, _data:&MsgData) {
-        self.print_debug_msg("Preparing to Quit...");
-        if self.bootstrap.is_none() {
-            let reply:&str;
-            if self.get_prev().is_none() || self.get_succ().is_none() || self.get_prev().unwrap().id == self.get_id() || self.get_succ().unwrap().id == self.get_id() {
-                self.print_debug_msg("Bootstrap node is alone in the network");
-                self.set_status(false);
-                reply = "Bootstrap node has left the network";
-            } else {
-                reply = "Bootstrap node cannot leave the network, depart the other nodes first";
-            }
-            let user_msg = Message::new(
-                MsgType::Reply, 
-                None,
-                &MsgData::Reply { reply: reply.to_string() }
-            );
-            client.unwrap().send_msg(&user_msg);
-            return;
-        }
-        // construct a "Quit" Request Message for previous
-        let prev = self.get_prev();
-        if let Some(prev_node) = prev {
-            if prev_node.id != self.get_id() {
-                let quit_msg_prev = Message::new(
-                    MsgType::Update,
-                    None,
-                    &MsgData::Update { prev_info: None, succ_info: self.get_succ() }
-                );
-                prev_node.send_msg(&quit_msg_prev);
-                self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", prev_node));
-            }
-        }
-        let succ = self.get_succ();
-        if let Some(succ_node) = succ{
-            if succ_node.id != self.get_id() {
-            // construct a "Quit" Request Message for successor
-                let quit_msg_succ = Message::new(
-                    MsgType::Update,
-                    None,
-                    &MsgData::Update { prev_info: self.get_prev(), succ_info: None }
-                );
-                succ_node.send_msg(&quit_msg_succ);
-                self.print_debug_msg(&format!("Sent Quit Message to {:?} succesfully ", succ_node));
-            }
-        }
-        // change status and inform user
-        self.set_status(false);
-        let user_msg = Message::new(
-            MsgType::Reply, 
-            None,
-            &MsgData::Reply { reply: format!("Node {} has left the network", self.get_id()) }
-        );
-        client.unwrap().send_msg(&user_msg);
-
-    }
-
     fn handle_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwJoin { new_node } => {
@@ -368,34 +321,53 @@ impl Node  {
 
                 if self.is_responsible(&id) { 
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {:#?}", new_node));
-                    // share records with the new node 
-                    let mut keys_to_transfer = Vec::new();
+                    // find records to share with the new node 
+                    let mut vec_items: Vec<Item> = Vec::new();
                     {
                         let records_read = self.records.read().unwrap();
                         for (key, item) in records_read.iter() {
                             if *key <= id {
-                                keys_to_transfer.push(key.clone());
+                                vec_items.push(item.clone());
                             }
                         }
                     }
 
+                    /* delete last replicas only and increment replication idx to keys transferred */
                     let mut records_write = self.records.write().unwrap();
-                    let mut vec_items: Vec<Item> = Vec::with_capacity(keys_to_transfer.len());
-                    for key in keys_to_transfer {
-                        if let Some(item) = records_write.remove(&key) {
-                            vec_items.push(item);
+                    let mut to_remove = Vec::new();  // Collect keys to remove later
+
+                    for (key, item) in records_write.iter_mut() {
+                        if item.replica_idx == self.replication_factor {
+                            to_remove.push(key.clone()); 
+                        } else if *key <= id {
+                            // Update the item
+                            item.replica_idx += 1;
+                        }
+                    }
+                    // Now remove the collected keys
+                    for key in to_remove {
+                        records_write.remove(&key);
+                    }
+
+                    // Pass current replica managers to new node
+                    let mut replica_managers_transferred = self.get_replica_managers();
+                    //Update current replica ranges 
+                    {
+                        let mut new_replica_managers = self.replica_managers.write().unwrap();
+                        new_replica_managers.push(id);   // add new node's id
+                        if new_replica_managers.len() == self.replication_factor as usize { 
+                            new_replica_managers.remove(0); // pop head
+                        } else {
+                            replica_managers_transferred.push(self.get_id()); // wrap around
                         }
                     }
 
-                    // TODO! Update replica ranges 
-
-                    
-                    // send a compact message with new neighbours and all new records
+                    // send a compact message with new neighbours, all new records and replica managers
                     let ack_msg = Message::new(
                         MsgType::AckJoin,
                         client,
                         &MsgData::AckJoin {  prev_info: prev_rd, succ_info: Some(self.get_info()), 
-                                                  new_items: vec_items, replica_range : // TODO! }
+                                                  new_items: vec_items, replica_ids : replica_managers_transferred}
                     );
 
                     self.send_msg(new_node, &ack_msg);
@@ -406,7 +378,7 @@ impl Node  {
                         let prev_msg = Message::new(
                             MsgType::Update,
                             None,
-                            &MsgData::Update { prev_info: None, succ_info: new_node }
+                            &MsgData::Update { prev_info: None, succ_info: new_node, new_items: None }
                         );
                         self.send_msg(prev_rd, &prev_msg);
 
@@ -437,13 +409,18 @@ impl Node  {
     fn handle_ack_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::AckJoin { prev_info, succ_info, 
-                               new_items, replica_range } => {
+                               new_items, replica_ids } => {
                 self.set_prev(*prev_info);
                 self.set_succ(*succ_info);
                 // insert new_items
                 for item in new_items.iter() {
                     let new_key = HashFunc(&item.title);
                     self.insert_aux(new_key, item);
+                }
+                // get replica managers assert vector is empty in this point
+                let mut replica_writer = self.replica_managers.write().unwrap();
+                for id in replica_ids{
+                    replica_writer.push(*id);
                 }
                 //inform user
                 let user_msg = Message::new(
@@ -459,7 +436,8 @@ impl Node  {
 
     fn handle_update(&self, data:&MsgData) {
         match data {
-            MsgData::Update { prev_info, succ_info } => {
+            MsgData::Update { prev_info, succ_info,
+                              new_items } => {
                 if !prev_info.is_none() {
                     self.set_prev(*prev_info);
                     self.print_debug_msg(&format!("Updated 'previous' to {:#?}", prev_info));
@@ -468,10 +446,94 @@ impl Node  {
                 if !succ_info.is_none() {
                     self.set_succ(*succ_info);
                     self.print_debug_msg(&format!("Updated 'successor' to {:#?}", succ_info));
+
+                    // in case of quit, decrement replica indices first and then get new keys 
+                    if !new_items.is_none() {
+                        let mut records_write = self.records.write().unwrap();
+
+                        for (_key, item) in records_write.iter_mut() {
+                            if item.replica_idx > 0 {
+                                item.replica_idx -= 1;
+                            }
+                        }
+                    }
+                    // new keys include only last replicas ...
+                    if let Some(vec_items) = new_items.as_ref() {
+                        for item in vec_items.iter() {
+                            assert!(item.replica_idx == self.replication_factor);
+                            let new_key = HashFunc(&item.title);
+                            self.insert_aux(new_key, item);
+                        }
+                    }
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
         }
+    }
+
+    pub fn handle_quit(&self, client:Option<&NodeInfo>, _data:&MsgData) {
+        self.print_debug_msg("Preparing to Quit...");
+        if self.bootstrap.is_none() {
+            let reply:&str;
+            if self.get_prev().is_none() || self.get_succ().is_none() || self.get_prev().unwrap().id == self.get_id() || self.get_succ().unwrap().id == self.get_id() {
+                self.print_debug_msg("Bootstrap node is alone in the network");
+                self.set_status(false);
+                reply = "Bootstrap node has left the network";
+            } else {
+                reply = "Bootstrap node cannot leave the network, depart the other nodes first";
+            }
+            let user_msg = Message::new(
+                MsgType::Reply, 
+                None,
+                &MsgData::Reply { reply: reply.to_string() }
+            );
+            client.unwrap().send_msg(&user_msg);
+            return;
+        }
+        /* construct an Update Message for previous
+            only neighbours change ? */ 
+        let prev = self.get_prev();
+        if let Some(prev_node) = prev {
+            if prev_node.id != self.get_id() {
+                let quit_msg_prev = Message::new(
+                    MsgType::Update,
+                    None,
+                    &MsgData::Update { prev_info: None, succ_info: self.get_succ(), new_items: None } 
+                );
+                prev_node.send_msg(&quit_msg_prev);
+                self.print_debug_msg(&format!("Sent Quit Message to {:#?} succesfully ", prev_node));
+            }
+        }
+        let succ = self.get_succ();
+        if let Some(succ_node) = succ{
+            if succ_node.id != self.get_id() {
+            /* construct an Update Message for successor
+               only last replicas must be transferred!? */
+               let mut items_transferred = Vec::new();
+               let record_reader = self.records.read().unwrap();
+               for (_key,item) in record_reader.iter(){
+                if item.replica_idx == self.replication_factor {
+                    items_transferred.push(item.clone());
+                }
+               }
+                let quit_msg_succ = Message::new(
+                    MsgType::Update,
+                    None,
+                    &MsgData::Update { prev_info: self.get_prev(), succ_info: None, new_items:Some(items_transferred) }
+                );
+                succ_node.send_msg(&quit_msg_succ);
+                self.print_debug_msg(&format!("Sent Quit Message to {:#?} succesfully ", succ_node));
+            }
+        }
+        // change status and inform user
+        self.set_status(false);
+        let user_msg = Message::new(
+            MsgType::Reply, 
+            None,
+            &MsgData::Reply { reply: format!("Node {} has left the network", self.get_id()) }
+        );
+        client.unwrap().send_msg(&user_msg);
+
     }
 
     fn handle_insert(&self, client:Option<&NodeInfo>, data:&MsgData) {
