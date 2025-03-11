@@ -3,11 +3,11 @@ use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
-use tokio::net;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::{Read,Write};
-use serde_json::{json,Value};
+use serde_json::Value;
 use std::thread;
+use std::fmt;
 
 use crate::messages::{Message, MsgType, MsgData};
 use crate::utils::{self, Consistency, DebugMsg, HashFunc, HashIP, HashType, Item};
@@ -33,6 +33,32 @@ pub struct Node {
     replication_mode : Consistency,                         // replication mode                
     records : Arc<RwLock<BTreeMap<HashType, Item>>>,        // list of hashed records per node
     status: Arc<AtomicBool>                                 // denotes if server is alive
+}
+
+impl fmt::Display for NodeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "NodeInfo [ ID: {}, IP: {}, Port: {}]",
+            self.id, self.ip_addr, self.port
+        )
+    }
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let prev = self.previous.read().unwrap();
+        let succ = self.successor.read().unwrap();
+        let replicas = self.replica_managers.read().unwrap();
+        let records_count = self.records.read().unwrap().len(); // Only show count for brevity
+
+        write!(
+            f,
+            "Node [\n  {},\n  Previous: {:?},\n  Successor: {:?},\n  
+            Replica Managers: {:?},\n  Records Count: {},\n  Status: {:?}\n]",
+            self.info, *prev, *succ, *replicas, records_count, self.status
+        )
+    }
 }
 
 impl NodeInfo {
@@ -75,7 +101,7 @@ impl NodeInfo {
                 }
 
                 self.print_debug_msg(&format!(
-                    "✅ Message {:#?} sent to {}:{} successfully",
+                    "✅ Message {} sent to {}:{} successfully",
                     msg,
                     self.ip_addr,
                     self.port
@@ -297,7 +323,7 @@ impl Node  {
             );
             bootstrap_node.send_msg(&join_msg);
         } 
-        else if self.bootstrap.unwrap().id == self.get_id(){
+        else {
             // bootstrap node just changes its status
             self.set_status(true);
             let user_msg = Message::new(
@@ -312,7 +338,7 @@ impl Node  {
     fn handle_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwJoin { new_node } => {
-                self.print_debug_msg(&format!("Handling Join Request - {:#?} ", new_node));
+                self.print_debug_msg(&format!("Handling Join Request - {} ", new_node));
                 let id = new_node.id;
                 let peer_port = new_node.port;
                 let peer_ip = new_node.ip_addr;
@@ -327,7 +353,7 @@ impl Node  {
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port));
 
                 if self.is_responsible(&id) { 
-                    self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {:#?}", new_node));
+                    self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
                     // find records to share with the new node 
                     let mut vec_items: Vec<Item> = Vec::new();
                     {
@@ -381,7 +407,7 @@ impl Node  {
 
                     // inform previous about the new node join
                     if !prev_rd.is_none() && self.get_id() != prev_rd.unwrap().id {
-                        self.print_debug_msg(&format!("Sending 'Update' to previous node {:#?}", prev_rd));
+                        self.print_debug_msg(&format!("Sending 'Update' to previous node {}", prev_rd.unwrap()));
                         let prev_msg = Message::new(
                             MsgType::Update,
                             None,
@@ -390,16 +416,16 @@ impl Node  {
                         self.send_msg(prev_rd, &prev_msg);
 
                     } else {
-                        self.print_debug_msg(&format!("Updating successor locally to {:#?}", new_node));
+                        self.print_debug_msg(&format!("Updating successor locally to {}", new_node.unwrap()));
                         self.set_succ(new_node);
                     }
                     // update always locally 
-                    self.print_debug_msg(&format!("Updating previous locally to {:#?}", new_node));
+                    self.print_debug_msg(&format!("Updating previous locally to {}", new_node.unwrap()));
                     self.set_prev(new_node);
                 }
                 // TODO! Check this point -  removed is_next_responsible as unnecessary...
                 else {
-                    self.print_debug_msg(&format!("Forwarding 'Join' Request to successor {:#?}", succ_rd));
+                    self.print_debug_msg(&format!("Forwarding 'Join' Request to successor {}", succ_rd.unwrap()));
                     let fw_msg = Message::new(
                         MsgType::FwJoin,
                         client,
@@ -437,7 +463,7 @@ impl Node  {
                 );
                 client.unwrap().send_msg(&user_msg);
             }
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
     }
 
@@ -447,12 +473,12 @@ impl Node  {
                               new_items } => {
                 if !prev_info.is_none() {
                     self.set_prev(*prev_info);
-                    self.print_debug_msg(&format!("Updated 'previous' to {:#?}", prev_info));
+                    self.print_debug_msg(&format!("Updated 'previous' to {}", prev_info.unwrap()));
                 }
 
                 if !succ_info.is_none() {
                     self.set_succ(*succ_info);
-                    self.print_debug_msg(&format!("Updated 'successor' to {:#?}", succ_info));
+                    self.print_debug_msg(&format!("Updated 'successor' to {}", succ_info.unwrap()));
 
                     // in case of quit, decrement replica indices first and then get new keys 
                     if !new_items.is_none() {
@@ -474,7 +500,7 @@ impl Node  {
                     }
                 }
             }
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         }
     }
 
@@ -508,7 +534,7 @@ impl Node  {
                     &MsgData::Update { prev_info: None, succ_info: self.get_succ(), new_items: None } 
                 );
                 prev_node.send_msg(&quit_msg_prev);
-                self.print_debug_msg(&format!("Sent Quit Message to {:#?} succesfully ", prev_node));
+                self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", prev_node));
             }
         }
         let succ = self.get_succ();
@@ -529,7 +555,7 @@ impl Node  {
                     &MsgData::Update { prev_info: self.get_prev(), succ_info: None, new_items:Some(items_transferred) }
                 );
                 succ_node.send_msg(&quit_msg_succ);
-                self.print_debug_msg(&format!("Sent Quit Message to {:#?} succesfully ", succ_node));
+                self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", succ_node));
             }
         }
         // change status and inform user
@@ -537,7 +563,7 @@ impl Node  {
         let user_msg = Message::new(
             MsgType::Reply, 
             None,
-            &MsgData::Reply { reply: format!("Node {} has left the network", self.get_id()) }
+            &MsgData::Reply { reply: format!("Node {} has left the network", self) }
         );
         client.unwrap().send_msg(&user_msg);
 
@@ -647,7 +673,7 @@ impl Node  {
                 }
             }
 
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         } 
     }
 
@@ -731,11 +757,11 @@ impl Node  {
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
                 }
 
             }
-            _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
+            _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
         }
     }
 
@@ -760,7 +786,7 @@ impl Node  {
                         }
                     }
                 }
-                _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
+                _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
             }
     }
 
@@ -872,11 +898,11 @@ impl Node  {
                         }
     
                     }
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
                 }
             }
 
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
     }
 
@@ -962,10 +988,10 @@ impl Node  {
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
                 }
             }
-            _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data)),
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         }
     }
 
@@ -1000,7 +1026,7 @@ impl Node  {
 
                 self.send_msg(succ_node, &fw_msg); 
             }
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         }
     }
 
@@ -1042,7 +1068,7 @@ impl Node  {
 
             }
 
-            _ => self.print_debug_msg(&format!("unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("unexpected data - {:?}", data))
         }
     }
     
@@ -1159,10 +1185,10 @@ impl Node  {
                             }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported consistency model - {:#?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported consistency model - {:?}", self.replication_mode))
                 }
             }
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
              
     }
@@ -1241,10 +1267,10 @@ impl Node  {
                         
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:#?}", self.replication_mode))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.replication_mode))
                 }
             }
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
     }
 
@@ -1277,7 +1303,7 @@ impl Node  {
                 }
             }
 
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data)),
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         }
     }
 
@@ -1309,7 +1335,7 @@ impl Node  {
 
             }
 
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
 
     }
@@ -1341,7 +1367,7 @@ impl Node  {
                 self.send_msg(succ_node, &fw_msg);  
 
             }
-            _ => self.print_debug_msg(&format!("Unexpected data - {:#?}", data))
+            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
     }
 
@@ -1370,13 +1396,12 @@ impl ConnectionHandler for Node {
                     
         // Convert the buffer to a string
         let received_msg = String::from_utf8_lossy(&buffer[..n]);
-        self.print_debug_msg(&format!("Received message: {:#?}", received_msg));
                     
         // Deserialize the received JSON message
         let json_value: Value = match serde_json::from_str(&received_msg) {
             Ok(value) => value,
             Err(e) => {
-                eprintln!("Failed to deserialize message: {}", e);
+                eprintln!("Failed to deserialize message: {:?} - {}", received_msg, e);
                 return;
             }
         };
@@ -1389,6 +1414,8 @@ impl ConnectionHandler for Node {
                 return;
             }
         };
+        self.print_debug_msg(&format!("Received: {}", msg));
+
             let sender_info = msg.extract_client();        
             let msg_type = msg.extract_type();
             let msg_data = msg.extract_data();
@@ -1400,7 +1427,7 @@ impl ConnectionHandler for Node {
                         let error_msg = Message::new(
                             MsgType::Reply,
                             None,
-                            &MsgData::Reply { reply: format!("Node is offline")}
+                            &MsgData::Reply { reply: format!("Node {} is offline", self.get_info())}
                         );
                         sender_info.unwrap().send_msg(&error_msg);
                         return; 
@@ -1444,7 +1471,7 @@ impl ConnectionHandler for Node {
                     
                 MsgType::FwOverlay => self.handle_fw_overlay(sender_info, &msg_data),
 
-                _ => eprintln!("Invalid message type: {:#?}", msg_type) 
+                _ => eprintln!("Invalid message type: {:?}", msg_type) 
             }
             
         } 

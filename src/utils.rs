@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest,Sha1};
+use std::hash::Hash;
 use std::sync::{Arc, Mutex, Condvar};
 use std::fmt;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -24,7 +25,7 @@ pub trait DebugMsg {
 impl<T> DebugMsg for T {}
 
 // type synonym for actual hash returned from SHA-1
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HashType(pub [u8; 20]); 
 
 
@@ -35,6 +36,12 @@ impl fmt::Display for HashType {
             write!(f, "{:02x}", byte)?; // Format as hexadecimal
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for HashType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self) // Reuse Display formatting
     }
 }
 

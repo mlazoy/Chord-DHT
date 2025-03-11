@@ -1,3 +1,4 @@
+use std::fmt;
 use crate::{node::NodeInfo, utils::HashType, utils::Item};
 
 use serde::{Deserialize,Serialize};
@@ -24,11 +25,29 @@ pub enum MsgType {
     Reply
 } 
 
+impl fmt::Display for MsgType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self) // Print the enum variant name
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     r#type:MsgType,
     client: Option<NodeInfo>,
     data: MsgData
+}
+
+impl fmt::Display for Message {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Message [ Type: {}", self.r#type)?;
+
+        if let Some(client) = &self.client {
+            write!(f, ", Client: {}", client)?;
+        }
+
+        write!(f, ", Data: {} ]", self.data)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +71,34 @@ pub enum MsgData {
     Overlay { },
     FwOverlay { peers: Vec<NodeInfo> },
     Reply { reply: String }
+}
+
+impl fmt::Display for MsgData {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            MsgData::Join { id } => write!(f, "{}", id),
+            MsgData::FwJoin { new_node } => write!(f, "{}", new_node),
+            MsgData::AckJoin { prev_info, succ_info, new_items, replica_ids } => 
+                write!(f, "{:?}, {:?}, {:?}, {:?}", prev_info, succ_info, new_items, replica_ids),
+            MsgData::Quit { id } => write!(f, "{}", id),
+            MsgData::Update { prev_info, succ_info, new_items } => 
+                write!(f, "{:?}, {:?}, {:?}", prev_info, succ_info, new_items),
+            MsgData::Insert { key, value } => write!(f, "{}, {}", key, value),
+            MsgData::FwInsert { key, value, replica, forward_back } => 
+                write!(f, "{}, {}, {}, {}", key, value, replica, forward_back),
+            MsgData::AckInsert { key } => write!(f, "{}", key),
+            MsgData::Delete { key } => write!(f, "{}", key),
+            MsgData::FwDelete { key, forward_back } => write!(f, "{}, {}", key, forward_back),
+            MsgData::AckDelete { key } => write!(f, "{}", key),
+            MsgData::Query { key } => write!(f, "{}", key),
+            MsgData::FwQuery { key, forward_tail } => write!(f, "{}, {}", key, forward_tail),
+            MsgData::QueryAll {} => write!(f, ""),
+            MsgData::FwQueryAll { record_list, header } => write!(f, "{:?}, {}", record_list, header),
+            MsgData::Overlay {} => write!(f, ""),
+            MsgData::FwOverlay { peers } => write!(f, "{:?}", peers),
+            MsgData::Reply { reply } => write!(f, "{}", reply),
+        }
+    }
 }
 
 impl Message {
