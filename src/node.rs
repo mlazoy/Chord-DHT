@@ -403,7 +403,11 @@ impl Node  {
                         }
                     } // release replica locks here 
 
-                    // find records to share with the new node according to new managers
+                    // update always locally 
+                    self.print_debug_msg(&format!("Updating previous locally to {}", new_node.unwrap()));
+                    self.set_prev(new_node);
+
+                    // find records to share with the new node according to new managers and previous
                     let mut vec_items: Vec<Item> = Vec::new();
                     {
                         let records_read = self.records.read().unwrap();
@@ -445,9 +449,6 @@ impl Node  {
                         self.print_debug_msg(&format!("Updating successor locally to {}", new_node.unwrap()));
                         self.set_succ(new_node);
                     }
-                    // update always locally 
-                    self.print_debug_msg(&format!("Updating previous locally to {}", new_node.unwrap()));
-                    self.set_prev(new_node);
 
                     // update my replica indices
                     self.relocate_replicas();
@@ -583,7 +584,9 @@ impl Node  {
                     if let Some(copies) = new_copies { 
                         for copy in copies.iter(){
                             let key_copy = HashFunc(&copy.title);
-                            self.insert_aux(key_copy, &copy);
+                            if self.records.read().unwrap().get(&key_copy).is_none() {
+                                self.insert_aux(key_copy, &copy);
+                            }
                         }
                     }
 
@@ -673,6 +676,10 @@ impl Node  {
             );
 
             self.send_msg(self.get_succ(), &rel_msg);
+        }
+        // delete all records 
+        if let Ok(mut map) = self.records.write() {
+            map.clear();
         }
         // change status and inform user
         self.set_status(false);
