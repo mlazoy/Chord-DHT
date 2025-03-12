@@ -22,7 +22,8 @@ pub enum MsgType {
     FwQueryAll,
     Overlay,
     FwOverlay,
-    Reply
+    Reply,
+    Relocate
 } 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +42,7 @@ pub enum MsgData {
     FwJoin { new_node: NodeInfo },
     AckJoin { prev_info: Option<NodeInfo>, succ_info : Option<NodeInfo>, new_items:Vec<Item>, replica_config: ReplicationConfig  },
     Quit { id: String },
-    Update { prev_info: Option<NodeInfo>, succ_info: Option<NodeInfo>, new_items: Option<Vec<Item>> },
+    Update { prev_info: Option<NodeInfo>, succ_info: Option<NodeInfo> },
     Insert { key: String, value: String },
     FwInsert { key: String, value: String, replica:i16, forward_back:bool },
     AckInsert {key : HashType },
@@ -54,7 +55,8 @@ pub enum MsgData {
     FwQueryAll { record_list: Vec<Item>, header: HashType },
     Overlay { },
     FwOverlay { peers: Vec<NodeInfo> },
-    Reply { reply: String }
+    Reply { reply: String },
+    Relocate { k_remaining:u8, inc: bool, new_copies: Option<Vec<Item>> } 
 }
 
 impl Message {
