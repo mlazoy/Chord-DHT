@@ -440,13 +440,16 @@ impl Node  {
 
                     // forward replica relocation to successors
                     let k = self.get_current_k();
-                    let rel_msg = Message::new(
-                        MsgType::Relocate,
-                        None,
-                        &MsgData::Relocate { k_remaining: k - 1, inc: true, new_copies: None }
-                    );
 
-                    self.send_msg(self.get_succ(), &rel_msg);
+                    if k > 0 {
+                        let rel_msg = Message::new(
+                            MsgType::Relocate,
+                            None,
+                            &MsgData::Relocate { k_remaining: k - 1, inc: true, new_copies: None }
+                        );
+
+                        self.send_msg(self.get_succ(), &rel_msg);
+                    }
 
                 }
                 
@@ -637,7 +640,26 @@ impl Node  {
                 succ_node.send_msg(&quit_msg_succ);
                 self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", succ_node));
             }
-            // TODO! RELOCATE MSG
+
+            // gather last repicas
+            let mut last_replicas = Vec::new();
+            let k = self.get_current_k();
+            let record_reader = self.records.read().unwrap();
+            for (_key, item) in record_reader.iter(){
+                if item.replica_idx == k {
+                    last_replicas.push(item.clone());
+                }
+            }
+            
+            if k > 0 {
+                let rel_msg = Message::new(
+                    MsgType::Relocate,
+                    None,
+                    &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas) }
+                );
+
+                self.send_msg(self.get_succ(), &rel_msg);
+            }
         }
         // change status and inform user
         self.set_status(false);
