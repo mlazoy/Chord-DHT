@@ -341,9 +341,10 @@ impl Node  {
                     println!("Node is already part of the network.");
                     return;
                 } 
-                // get a read lock on neighbors
+                // get a read lock on neighbors and k
                 let prev_rd = self.get_prev();
                 let succ_rd = self.get_succ();
+                let max_k = self.max_replication();
                 // create the new node
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port));
 
@@ -358,24 +359,26 @@ impl Node  {
                                 vec_items.push(item.clone());
                             }
                         }
-                    }
+                    } // drop locks here
 
-                    /* delete last replicas only and increment replication idx to keys transferred */
-                    let mut records_write = self.records.write().unwrap();
-                    let mut to_remove = Vec::new();  // Collect keys to remove later
+                    {
+                        /* delete last replicas only and increment replication idx to keys transferred */
+                        let mut records_write = self.records.write().unwrap();
+                        let mut to_remove = Vec::new();  // Collect keys to remove later
 
-                    for (key, item) in records_write.iter_mut() {
-                        if item.replica_idx == self.max_replication() {
-                            to_remove.push(key.clone()); 
-                        } else if *key <= id {
-                            // Update the item
-                            item.replica_idx += 1;
+                        for (key, item) in records_write.iter_mut() {
+                            if item.replica_idx == max_k {
+                                to_remove.push(key.clone()); 
+                            } else if *key <= id {
+                                // Update the item
+                                item.replica_idx += 1;
+                            }
                         }
-                    }
-                    // Now remove the collected keys
-                    for key in to_remove {
-                        records_write.remove(&key);
-                    }
+                        // Now remove the collected keys
+                        for key in to_remove {
+                            records_write.remove(&key);
+                        }
+                    } // release record locks here
 
                     // Pass current replica managers to new node
                     let mut replica_managers_transferred = self.get_replica_managers();
@@ -384,15 +387,15 @@ impl Node  {
                         let mut replication_writer = self.replication.write().unwrap();
                         let new_replica_managers = &mut replication_writer.replica_managers;
                         new_replica_managers.push(id);   // add new node's id
-                        if new_replica_managers.len() == (self.max_replication() + 1) as usize { 
+                        if new_replica_managers.len() == (max_k + 1) as usize { 
                             new_replica_managers.remove(0); // pop head
                         } else {
                             replica_managers_transferred.push(self.get_id()); // wrap around
                         }
-                    }
+                    } // release replica locks here 
 
                     let replica_config = ReplicationConfig {
-                        replication_factor: self.max_replication(),
+                        replication_factor: max_k,
                         replication_mode: self.get_consistency(),
                         replica_managers: replica_managers_transferred
                     };
@@ -462,7 +465,7 @@ impl Node  {
                     for id in &replica_config.replica_managers{
                         manager_writer.push(*id);
                     }
-                } // release locks here
+                } // release replica locks here
 
                 // change status 
                 self.set_status(true);
@@ -496,13 +499,14 @@ impl Node  {
                                     item.replica_idx -= 1;
                                 }
                             }
-                        } // drop lock here...
+                        } //release record lock here...
 
                         // new keys include only last replicas ...
+                        let curr_k = self.get_current_k();
                         self.print_debug_msg(&format!("Getting new keys {:?}", new_items));
                         if let Some(vec_items) = new_items.as_ref() {
                             for item in vec_items.iter() {
-                                assert!(item.replica_idx == self.get_current_k());
+                                assert!(item.replica_idx == curr_k);
                                 let new_key = HashFunc(&item.title);
                                 self.insert_aux(new_key, item);
                                 self.print_debug_msg(&format!("Inserted item {}-{} sucessfully!", item.title, item.value));
@@ -522,9 +526,13 @@ impl Node  {
 
     pub fn handle_quit(&self, client:Option<&NodeInfo>, _data:&MsgData) {
         self.print_debug_msg("Preparing to Quit...");
+        // grab read locks here 
+        let prev = self.get_prev();
+        let succ = self.get_succ();
+
         if self.bootstrap.is_none() {
             let reply:&str;
-            if self.get_prev().is_none() || self.get_succ().is_none() || self.get_prev().unwrap().id == self.get_id() || self.get_succ().unwrap().id == self.get_id() {
+            if prev.is_none() || succ.is_none() || prev.unwrap().id == self.get_id() || succ.unwrap().id == self.get_id() {
                 self.print_debug_msg("Bootstrap node is alone in the network");
                 self.set_status(false);
                 reply = "Bootstrap node has left the network";
@@ -541,19 +549,18 @@ impl Node  {
         }
         /* construct an Update Message for previous
             only neighbours change ? */ 
-        let prev = self.get_prev();
         if let Some(prev_node) = prev {
             if prev_node.id != self.get_id() {
                 let quit_msg_prev = Message::new(
                     MsgType::Update,
                     None,
-                    &MsgData::Update { prev_info: None, succ_info: self.get_succ(), new_items: None } 
+                    &MsgData::Update { prev_info: None, succ_info: succ, new_items: None } 
                 );
                 prev_node.send_msg(&quit_msg_prev);
                 self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", prev_node));
             }
         }
-        let succ = self.get_succ();
+
         if let Some(succ_node) = succ{
             if succ_node.id != self.get_id() {
             /* construct an Update Message for successor
@@ -568,7 +575,7 @@ impl Node  {
                 let quit_msg_succ = Message::new(
                     MsgType::Update,
                     None,
-                    &MsgData::Update { prev_info: self.get_prev(), succ_info: None, new_items:Some(items_transferred) }
+                    &MsgData::Update { prev_info: prev, succ_info: None, new_items:Some(items_transferred) }
                 );
                 succ_node.send_msg(&quit_msg_succ);
                 self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", succ_node));
@@ -1452,7 +1459,7 @@ impl ConnectionHandler for Node {
             let msg_data = msg.extract_data();
 
             match msg_type {
-                MsgType::Join => (),
+                MsgType::Join | MsgType::AckJoin => (),
                 _ => {
                     if !self.get_status() {
                         let error_msg = Message::new(
@@ -1519,18 +1526,28 @@ impl fmt::Display for NodeInfo {
     }
 }
 
+impl fmt::Display for ReplicationConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Replication [ k: {}, consistency: {:?}, managers: {:?}]",
+            self.replication_factor, self.replication_mode, self.replica_managers
+        )
+    }
+}
+
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let prev = self.previous.read().unwrap();
         let succ = self.successor.read().unwrap();
-        let replicas = self.replication.read().unwrap();
+        let replica_config = self.replication.read().unwrap();
         let records_count = self.records.read().unwrap().len(); // Only show count for brevity
 
         write!(
             f,
             "Node [\n  {},\n  Previous: {:?},\n  Successor: {:?},\n  
             Replica Managers: {:?},\n  Records Count: {},\n  Status: {:?}\n]",
-            self.info, *prev, *succ, replicas.replica_managers, records_count, self.status
+            self.info, *prev, *succ, replica_config, records_count, self.status
         )
     }
 }
