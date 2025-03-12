@@ -25,7 +25,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 2 {
-        eprintln!("Usage: {} [bootstrap <k> <m> |node| cli]", args[0]);
+        eprintln!("Usage: {} [bootstrap <k> <m> |node| cli <command> [args]]", args[0]);
         return;
     }
 
@@ -79,14 +79,10 @@ fn main() {
         }
 
         "cli" => {
-            if args.len() < 2 {
-                panic!("Usage: cargo run cli");
-            }
-            
-            cli::run_cli(get_local_ip(), if get_local_ip() == BOOT_ADDR { API_PORT } else {API_PORT + 1});
+            cli::run_cli();
         }
         _ => {
-            eprintln!("Usage: {} [bootstrap <k> <m> |node| cli]", args[0]);
+            eprintln!("Usage: {} [bootstrap <k> <m> |node| cli <command> [args]]", args[0]);
         }
     }
 

@@ -6,15 +6,17 @@ use serde_json::Value;
 
 use crate::messages::{MsgType,MsgData,Message}; 
 use crate::node::NodeInfo;  
+use crate::utils::get_local_ip;
 
 
 /// Sends a request to the node and reads a response.
 fn send_request(ip: Ipv4Addr, port: u16, request_msg: &Message) -> Result<String, String> {
     let request = serde_json::json!(request_msg).to_string();
     let address = format!("{}:{}", ip, port);
+    let response_ip = get_local_ip();
     let response_port = port + 42;
     println!("Sending request to {}: {}", address, request);
-    let response_address = format!("{}:{}", ip, response_port);
+    let response_address = format!("{}:{}", response_ip, response_port);
 
     // 🚀 Step 1: Start a listening socket on response_port
     let listener = TcpListener::bind(&response_address).map_err(|e| format!("Failed to bind response port: {}", e))?;
@@ -73,158 +75,132 @@ fn send_request(ip: Ipv4Addr, port: u16, request_msg: &Message) -> Result<String
 }
 
 
-/// CLI loop that takes user input, sends requests to the node, and prints responses.
-pub fn run_cli(node_ip: Ipv4Addr, node_port: u16) {
-    loop {
-        print!("chordify> ");
-        if let Err(_) = io::stdout().flush() {
-            eprintln!("Error flushing stdout.");
-        }
-
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                let line = input.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let command = parts[0].to_lowercase();
-                match command.as_str() {
-                    "insert" => {
-                        if parts.len() < 2 {
-                            println!("Usage:");
-                            println!("  insert <key> <value>");
-                            continue;
-                        }
-                        let request = Message::new(
-                            MsgType::Insert,
-                            Some(&NodeInfo::new(node_ip, node_port + 42)),
-                            &MsgData::Insert { key: parts[1].to_string(), value: parts[2].to_string() }
-                        );
-                    
-                        match send_request(node_ip, node_port, &request) {
-                            Ok(response) => println!("{}", response),
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
-
-                    "delete" => {
-                        if parts.len() < 2 {
-                            println!("Usage:");
-                            println!("  delete <key>");
-                            continue;
-                        }
-                        let request = Message::new(
-                            MsgType::Delete,
-                            Some(&NodeInfo::new(node_ip, node_port + 42)),
-                            &MsgData::Delete { key: parts[1].to_string() }
-                        );
+/// CLI routine to send requests to the chord network.
+pub fn run_cli() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 5 {
+        eprintln!("Usage: cargo run cli <ip> <port> <command> [args]");
+        process::exit(1);
+    }
     
-                        match send_request(node_ip, node_port, &request) {
-                            Ok(response) => println!("{}", response),
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
+    let node_ip = args[2].parse().expect("Invalid IP address");
+    let node_port = args[3].parse().expect("Invalid port number");
+    let command = args[4].as_str();
+    match command {
+        "insert" => {
+            if args.len() < 6 {
+                println!("Usage:");
+                println!("cargo run cli <ip> <port> insert <key> <value>");
+                process::exit(1);
+            }
 
-                    "query" => {
-                        if parts.len() < 2 {
-                            println!("Usage:");
-                            println!("  query [<key> | *]");
-                            continue;
-                        }
-
-                        let request:Message;
-
-                        if parts[1] == "*" {
-                            request = Message::new(
-                                MsgType::QueryAll,
-                                Some(&NodeInfo::new(node_ip, node_port + 42)),
-                                &MsgData::QueryAll {  }
-                            );
-                        } else {
-                            request = Message::new(
-                                MsgType::Query,
-                                Some(&NodeInfo::new(node_ip, node_port + 42)),
-                                &MsgData::Query{key: parts[1].to_string() }
-                            );
-                        }
-                        match send_request(node_ip, node_port, &request) {
-                            Ok(response) => println!("{}", response),
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
-
-                    "overlay" => {
-                        let request = Message::new(
-                            MsgType::Overlay,
-                            Some(&NodeInfo::new(node_ip, node_port + 42)),
-                            &MsgData::Overlay {  }
-                        );
-                        
-                        match send_request(node_ip, node_port, &request) {
-                            Ok(response) => {
-                                println!("{}", response);
-                            }
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
-
-                    "depart" => {
-                        let request = Message::new(
-                            MsgType::Quit,
-                            Some(&NodeInfo::new(node_ip, node_port + 42)),
-                            &MsgData::Quit { id: format!("") } // TODO! 
-                        );
-                        
-                        match send_request(node_ip, node_port, &request) {
-                            Ok(response) => {
-                                println!("{}", response);
-                            }
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
-
-                    "join" => {
-                        let request = Message::new(
-                            MsgType::Join,
-                            Some(&NodeInfo::new(node_ip, node_port + 42)),
-                            &MsgData::Join { id: format!("") }   // TODO!
-                        );
-                        
-                        match send_request(node_ip, node_port, &request) {
-                            Ok(response) => println!("{}", response),
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
-
-                    "help" => {
-                        println!("Available commands:");
-                        println!("  insert <key> <value>  => Insert a (key,value) in the DHT");
-                        println!("  delete <key>          => Delete the given key from the DHT");
-                        println!("  query <key>           => Query the DHT for a specific key or '*' for all");
-                        println!("  overlay               => Print the chord ring topology");
-                        println!("  depart                => Gracefully remove this node from the ring");
-                        println!("  help                  => Show this help message");
-                        println!("  exit                  => Quit the CLI");
-                    }
-
-                    "exit" | "quit" => {
-                        println!("Exiting CLI...");
-                        break;
-                    }
-
-                    _ => {
-                        println!("Unknown command. Type 'help' to see available commands.")
-                    }
+            let request = Message::new(
+                MsgType::Insert,
+                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                &MsgData::Insert { key: args[5].to_string(), value: args[6].to_string() }
+            );
+        
+            match send_request(node_ip, node_port, &request) {
+                Ok(response) => println!("{}", response),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        "delete" => {
+            if args.len() < 5 {
+                println!("Usage:");
+                println!("cargo run cli <ip> <port> delete <key>");
+                process::exit(1);
+            }
+            let request = Message::new(
+                MsgType::Delete,
+                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                &MsgData::Delete { key: args[5].to_string() }
+            );
+            match send_request(node_ip, node_port, &request) {
+                Ok(response) => println!("{}", response),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        "query" => {
+            if args.len() < 5 {
+                println!("Usage:");
+                println!("cargo run cli <ip> <port> query [<key> | *] ");
+                process::exit(1);
+            } 
+            let request:Message;
+            if args[3].as_str() == "*" {
+                request = Message::new(
+                    MsgType::QueryAll,
+                    Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                    &MsgData::QueryAll {  }
+                );
+            } else {
+                request = Message::new(
+                    MsgType::Query,
+                    Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                    &MsgData::Query{key: args[5].to_string() }
+                );
+            }
+            match send_request(node_ip, node_port, &request) {
+                Ok(response) => println!("{}", response),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        "overlay" => {
+            let request = Message::new(
+                MsgType::Overlay,
+                Some(&NodeInfo::new(node_ip, node_port + 42)),
+                &MsgData::Overlay {  }
+            );
+            
+            match send_request(node_ip, node_port, &request) {
+                Ok(response) => {
+                    println!("{}", response);
                 }
+                Err(e) => eprintln!("Error: {}", e),
             }
-            Err(e) => {
-                println!("Error reading from stdin: {}", e);
+        }
+        "depart" => {
+            let request = Message::new(
+                MsgType::Quit,
+                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                &MsgData::Quit { id: format!("") } // TODO! 
+            );
+            
+            match send_request(node_ip, node_port, &request) {
+                Ok(response) => {
+                    println!("{}", response);
+                }
+                Err(e) => eprintln!("Error: {}", e),
             }
+        }
+        "join" => {
+            let request = Message::new(
+                MsgType::Join,
+                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                &MsgData::Join { id: format!("") }   // TODO!
+            );
+            
+            match send_request(node_ip, node_port, &request) {
+                Ok(response) => println!("{}", response),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        "help" => {
+            println!("Options:");
+            println!("  <ip>                  => IP address of the node to connect to");
+            println!("  <port>                => Port of the node to connect to");
+            println!("Available commands:");
+            println!("  insert <key> <value>  => Insert a (key,value) in the DHT");
+            println!("  delete <key>          => Delete the given key from the DHT");
+            println!("  query <key>           => Query the DHT for a specific key or '*' for all");
+            println!("  overlay               => Print the chord ring topology");
+            println!("  join                  => Join the ring");
+            println!("  depart                => Gracefully remove this node from the ring");
+            println!("  help                  => Show this help message");
+        }
+        _ => {
+            println!("Unknown command. Type 'help' to see available commands.")
         }
     }
-
-    println!("CLI terminated.");
 }
