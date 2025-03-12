@@ -651,15 +651,14 @@ impl Node  {
                 }
             }
             
-            if k > 0 {
-                let rel_msg = Message::new(
-                    MsgType::Relocate,
-                    None,
-                    &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas) }
-                );
+            // TODO! Test this
+            let rel_msg = Message::new(
+                MsgType::Relocate,
+                None,
+                &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas) }
+            );
 
-                self.send_msg(self.get_succ(), &rel_msg);
-            }
+            self.send_msg(self.get_succ(), &rel_msg);
         }
         // change status and inform user
         self.set_status(false);
