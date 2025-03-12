@@ -268,7 +268,21 @@ impl Node  {
         let replica_managers = self.get_replica_managers();
         let mut idx = replica_managers.len() as i16;
         // edge case of 1 manager in the list
-
+        if idx == 1 {
+            let repl_factor = self.max_replication();
+            if repl_factor == 1  {
+                if replica_managers[0] < self.get_id() {
+                    // Normal case: key falls within (prev, self]
+                    return {if *key > replica_managers[0] && *key <= self.get_id() 1 else -1};
+                } else {
+                    // Wrapped case: previous is greater due to ring wrap-around
+                    return {if *key > replica_managers[0] || *key <= self.get_id() 1 else -1};
+                }
+            } else {
+                return 1;
+            }
+            
+        }
         let mut replicas_iter = replica_managers.iter();
         if let Some(mut prev) = replicas_iter.next() {  
             for curr in replicas_iter {

@@ -82,7 +82,7 @@ pub fn run_cli() {
         eprintln!("Usage: cargo run cli <ip> <port> <command> [args]");
         process::exit(1);
     }
-    
+
     let node_ip = args[2].parse().expect("Invalid IP address");
     let node_port = args[3].parse().expect("Invalid port number");
     let command = args[4].as_str();
