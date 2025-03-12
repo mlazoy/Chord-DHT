@@ -273,10 +273,10 @@ impl Node  {
             if repl_factor == 1  {
                 if replica_managers[0] < self.get_id() {
                     // Normal case: key falls within (prev, self]
-                    return {if *key > replica_managers[0] && *key <= self.get_id() 1 else -1};
+                    return if *key > replica_managers[0] && *key <= self.get_id() {1} else {-1};
                 } else {
                     // Wrapped case: previous is greater due to ring wrap-around
-                    return {if *key > replica_managers[0] || *key <= self.get_id() 1 else -1};
+                    return if *key > replica_managers[0] || *key <= self.get_id() {1} else {-1};
                 }
             } else {
                 return 1;
