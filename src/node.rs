@@ -455,11 +455,11 @@ impl Node  {
                     // forward replica relocation to successors
                     let k = self.get_current_k();
 
-                    if k > 0 {
+                    if k > 1 {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: k - 1, inc: true, new_copies: None }
+                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -669,7 +669,7 @@ impl Node  {
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas) }
+                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas) }
             );
 
             self.send_msg(self.get_succ(), &rel_msg);
