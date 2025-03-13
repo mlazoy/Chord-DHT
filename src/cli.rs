@@ -128,7 +128,7 @@ pub fn run_cli() {
                 process::exit(1);
             } 
             let request:Message;
-            if args[3].as_str() == "*" {
+            if args[5].as_str() == "*" {
                 request = Message::new(
                     MsgType::QueryAll,
                     Some(&NodeInfo::new(get_local_ip(), node_port + 42)),

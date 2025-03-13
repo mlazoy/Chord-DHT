@@ -206,18 +206,20 @@ where
     pub fn is_subset(&self, number: T) -> i16 {
         let len = self.replication_vector.len();
         if len > 1 {
+            wrap = 0;
             for i in 0..len {
                 let prev = &self.replication_vector[i];
                 let next = &self.replication_vector[i + 1];
                 if prev.upper == T::max_value() && next.lower == T::min_value() && next.lc && next.uc {
                     // wrap interval is (prev.lower, +INF) U [0, next.upper]
+                    wrap = 1;
                     if prev.in_range(number) || next.in_range(number) {
                         return i as i16;
                     } else { // just skip next
                         i += 1;
                     }
                 } 
-                else if prev.in_range(number) { return i as i16; }   
+                else if prev.in_range(number) { return (i - wrap) as i16; }   
             }
         } 
 

@@ -10,7 +10,7 @@ use std::{thread, vec};
 use std::fmt;
 
 use crate::messages::{Message, MsgType, MsgData};
-use crate::utils::{self, Consistency, DebugMsg, HashFunc, HashIP, HashType, Item};
+use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item, Range, UnionRange};
 use crate::network::{ConnectionHandler, Server};
 use crate::NUM_THREADS; 
 
@@ -21,12 +21,14 @@ pub struct NodeInfo {
     id : HashType
 }
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationConfig {
     replication_factor: u8,
     replication_mode: Consistency,
-    replica_managers: Vec<HashType>                         // the node ids of which it can holds replicas
+    replica_ranges: UnionRange<HashType>,
 }
+
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -116,7 +118,7 @@ impl Node  {
 
         let init_replication = ReplicationConfig {
             replication_factor: _k_repl.unwrap_or(0),
-            replica_managers: Vec::new(),           
+            replica_ranges: Vec::new(),           
             replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
         };
         
@@ -259,48 +261,9 @@ impl Node  {
     }
 
     fn is_replica_manager(&self, key:&HashType) -> i16 {
-        /* returns the corresponding replica_idx if it is a replica manager 
-            otherwise -1 */
-        if self.is_responsible(key) {
-            return 0;
-        }
-        // check if node[i].id <= key < node[j].id, forall i < j
-        let replica_managers = self.get_replica_managers();
-        let mut idx = replica_managers.len() as i16;
-        // edge case of 1 manager in the list
-        if idx == 1 {
-            let repl_factor = self.max_replication();
-            if repl_factor == 1  {
-                if replica_managers[0] < self.get_id() {
-                    // Normal case: key falls within (prev, self]
-                    return if *key > replica_managers[0] && *key <= self.get_id() {1} else {-1};
-                } else {
-                    // Wrapped case: previous is greater due to ring wrap-around
-                    return if *key > replica_managers[0] || *key <= self.get_id() {1} else {-1};
-                }
-            } else {
-                return 1;
-            }
-            
-        }
-        let mut replicas_iter = replica_managers.iter();
-        if let Some(mut prev) = replicas_iter.next() {  
-            for curr in replicas_iter {
-                idx -= 1;
-                // Normal case
-                if *prev < *curr {
-                    if *key >= *prev && *key < *curr {
-                        return idx;
-                    }
-                } else { // Wrap-around case
-                    if *key >= *prev || *key < *curr {
-                        return idx;
-                    }
-                }
-                prev = curr;
-            }
-        }
-        -1 
+        let replication_reader = self.replication.read().unwrap();
+        let replica_range_reader = replication_reader.replica_ranges;
+        return replica_range_reader.is_subset(key);
     }
 
     fn relocate_replicas(&self) {
@@ -418,10 +381,13 @@ impl Node  {
                         }
                     } // drop locks here
 
+                    // TODO! FIX THIS!
+                    let full_range = Range::new(HashType::min_value(), HashType::max_value(), true, true);
+
                     let replica_config = ReplicationConfig {
                         replication_factor: max_k,
                         replication_mode: self.get_consistency(),
-                        replica_managers: replica_managers_transferred
+                        replica_ranges:  UnionRange::new(vec![full_range])
                     };
 
                     // send a compact message with new neighbours, all new records and replica managers
