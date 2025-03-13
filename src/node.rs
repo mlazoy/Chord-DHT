@@ -1,3 +1,4 @@
+use std::hash::RandomState;
 use std::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
@@ -352,19 +353,19 @@ impl Node  {
 
                 if self.is_responsible(&id) { 
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
-                    // define replica managers for current and new node 
-                    let mut replica_managers_transferred = self.get_replica_managers();
-                    //Update current replica ranges 
+
+                    // update my key ranges
+                    let new_range = Range::new(id, self.get_id(), false, true);
+                    let new_replica_range = Range::new(prev_rd.id, id,false, true);
                     {
-                        let mut replication_writer = self.replication.write().unwrap();
-                        let new_replica_managers = &mut replication_writer.replica_managers;
-                        new_replica_managers.push(id);   // add new node's id
-                        if new_replica_managers.len() == (max_k + 1) as usize { 
-                            new_replica_managers.remove(0); // pop head
-                        } else {
-                            replica_managers_transferred.push(self.get_id()); // wrap around
+                        let replica_writer = self.replication.write().unwrap();
+                        let mut ranges = replica_writer.replica_ranges;
+                        ranges.push(new_replica_range);
+                        ranges.push(new_range);
+                        while ranges.get_size() > max_k {
+                            ranges.pop(0);
                         }
-                    } // release replica locks here 
+                    } // release replica locks...
 
                     // update always locally 
                     self.print_debug_msg(&format!("Updating previous locally to {}", new_node.unwrap()));
@@ -381,13 +382,13 @@ impl Node  {
                         }
                     } // drop locks here
 
-                    // TODO! FIX THIS!
-                    let full_range = Range::new(HashType::min_value(), HashType::max_value(), true, true);
+                    // pass all key_renges to new previous
+                    let my_key_ranges = self.get_replica_managers();
 
                     let replica_config = ReplicationConfig {
                         replication_factor: max_k,
                         replication_mode: self.get_consistency(),
-                        replica_ranges:  UnionRange::new(vec![full_range])
+                        replica_ranges: my_key_ranges
                     };
 
                     // send a compact message with new neighbours, all new records and replica managers
@@ -415,6 +416,7 @@ impl Node  {
                         self.print_debug_msg(&format!("Updating successor locally to {}", new_node.unwrap()));
                         self.set_succ(new_node);
                     }
+
 
                     // update my replica indices
                     self.relocate_replicas();

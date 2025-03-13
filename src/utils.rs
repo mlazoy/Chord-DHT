@@ -197,7 +197,7 @@ where
 
     pub fn new(ranges: Vec<Range<T>>) -> Self {
         UnionRange {
-            replication_vector: ranges,
+            replication_vector: ranges
         }
     }
 
@@ -229,5 +229,12 @@ where
 
         -1
     }
+
+    // wrapping creates 2 sets but must count as 1
+    pub fn get_size(&self) -> u8 {
+        // TODO! 
+        0
+    }
+
 }
 
