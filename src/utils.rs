@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::{Ipv4Addr, UdpSocket};
 use hex::{FromHex, ToHex};
 use std::cmp::Ord;
+use num_traits::Bounded;
 
 use crate::node::NodeInfo;
 
@@ -62,6 +63,16 @@ impl<'de> Deserialize<'de> for HashType {
         let hex_str = String::deserialize(deserializer)?;
         let bytes = <[u8; 20]>::from_hex(hex_str).map_err(serde::de::Error::custom)?;
         Ok(HashType(bytes))
+    }
+}
+
+impl Bounded for HashType {
+    fn min_value() -> Self {
+        HashType([0u8; 20])
+    }
+
+    fn max_value() -> Self {
+        HashType([0xFF; 20])
     }
 }
 
@@ -147,3 +158,74 @@ pub fn format_queryall_msg(items: &Vec<Item>) -> String {
     }
     result
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Range<T> {
+    lower: T,
+    upper: T,
+    lc: bool, // lower is included
+    uc: bool, // upper is included
+}
+
+impl<T> Range<T>
+where
+    T: PartialOrd + PartialEq + Copy,
+{
+    pub fn new(lower: T, upper: T, lc: bool, uc: bool) -> Self {
+        Range { lower, upper, lc, uc }
+    }
+
+    pub fn in_range(&self, number: T) -> bool {
+        // Check if number equals lower and lower is inclusive,
+        // or equals upper and upper is inclusive,
+        // or lies strictly between lower and upper.
+        (self.lc && number == self.lower)
+            || (self.uc && number == self.upper)
+            || (self.lower < number && number < self.upper)
+    }
+}
+
+#[derive(Debug, Clone , Serialize, Deserialize)]
+pub struct UnionRange<T> {
+    replication_vector: Vec<Range<T>>,
+}
+
+impl<T> UnionRange<T>
+where
+    T: PartialOrd + PartialEq + Copy + Bounded,
+{
+
+    pub fn new(ranges: Vec<Range<T>>) -> Self {
+        UnionRange {
+            replication_vector: ranges,
+        }
+    }
+
+    /* returns -1 if `number` is not in any range;
+        otherwise returns the relative position (index) of the subset it belongs to. */
+    pub fn is_subset(&self, number: T) -> i16 {
+        let len = self.replication_vector.len();
+        if len > 1 {
+            for i in 0..len {
+                let prev = &self.replication_vector[i];
+                let next = &self.replication_vector[i + 1];
+                if prev.upper == T::max_value() && next.lower == T::min_value() && next.lc && next.uc {
+                    // wrap interval is (prev.lower, +INF) U [0, next.upper]
+                    if prev.in_range(number) || next.in_range(number) {
+                        return i as i16;
+                    } else { // just skip next
+                        i += 1;
+                    }
+                } 
+                else if prev.in_range(number) { return i as i16; }   
+            }
+        } 
+
+        else if self.replication_vector[0].in_range(number) {
+            return 0;
+        }
+
+        -1
+    }
+}
+
