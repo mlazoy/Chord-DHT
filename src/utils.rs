@@ -221,9 +221,8 @@ where
         self.replication_vector.len()
     }
 
-    pub fn get_my_range(&self) -> Range<T> {
-        let last_idx = self.replication_vector.len()-1;
-        self.replication_vector[last_idx-1]
+    pub fn get_my_range(&self) -> Option<&Range<T>> {
+        self.replication_vector.last()
     }
 
     pub fn is_subset(&self, element: T ) -> i16 {

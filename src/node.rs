@@ -231,9 +231,11 @@ impl Node  {
 
     fn is_responsible(&self, key: &HashType) -> bool {
         let replica_ranges = self.get_replica_ranges();
-        let my_range = replica_ranges.get_my_range();
-        if my_range.in_range(*key) { true }
-        else { false }
+        if let Some(my_range) = replica_ranges.get_my_range() {
+            my_range.in_range(*key)
+        } else {
+            false 
+        }
     }
 
     // returns -1 if not a replica manager, otherwise the replica_idx of key in this node
@@ -317,14 +319,19 @@ impl Node  {
                 true, 
                 true);
                 ranges.insert(full_range);
-            }
+
+                self.print_debug_msg(&format!("Initial key range: {:?}", ranges));
+            } //release replica locks
+            
             // bootstrap node just changes its status
             self.set_status(true);
+
             let user_msg = Message::new(
                 MsgType::Reply,
                 None,
                 &MsgData::Reply { reply: format!("Bootstrap node joined the ring successfully!") }
             );
+
             client.unwrap().send_msg(&user_msg);
         } 
     }
@@ -351,6 +358,8 @@ impl Node  {
                 let max_k = self.max_replication();
                 // create the new node
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port));
+                
+                self.print_debug_msg(&format!("My ranges: {:?}", self.get_replica_ranges()));
 
                 if self.is_responsible(&id) { 
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
