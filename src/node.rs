@@ -577,7 +577,11 @@ impl Node  {
                         } 
                     }
                 } // release write locks here
-                    let range_to_transfer = self.get_replica_ranges();
+                    let ranges_tmp = self.get_replica_ranges();
+                    let mut range_to_transfer = ranges_tmp.get_head();
+                    if ranges_tmp.get_size() == 1 {
+                        range_to_transfer.set_upper(self.get_succ().unwrap().id);
+                    }
                     if let Some(range) = range {
                         let mut replica_writer = self.replication.write().unwrap();
                         let ranges = &mut replica_writer.replica_ranges;
@@ -600,7 +604,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: false, new_copies: Some(to_transfer), range: Some(range_to_transfer.get_head()) }
+                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: false, new_copies: Some(to_transfer), range: Some(range_to_transfer) }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -675,10 +679,14 @@ impl Node  {
             
             // TODO! Test this
             let ranges = self.get_replica_ranges();
+            let mut range = ranges.get_head();
+            if ranges.get_size() == 1 {
+                range.set_upper(self.get_succ().unwrap().id);
+            }
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: Some(ranges.get_head()) }
+                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: Some(range) }
             );
 
             self.send_msg(self.get_succ(), &rel_msg);

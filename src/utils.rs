@@ -184,6 +184,14 @@ where
             || (self.lower < number && number < self.upper)
     }
 
+    pub fn set_lower(&mut self, lower: T) {
+        self.lower = lower;
+    }
+
+    pub fn set_upper(&mut self, upper: T) {
+        self.upper = upper;
+    }
+
     pub fn get_bounds(&self) -> (T, T) {
         (self.lower, self.upper)
     }
