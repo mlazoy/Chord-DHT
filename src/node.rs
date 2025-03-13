@@ -438,7 +438,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None }
+                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: None }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -517,7 +517,7 @@ impl Node  {
 
     fn handle_relocate(&self, data:&MsgData) {
         match data {
-            MsgData::Relocate { k_remaining, inc, new_copies } => {
+            MsgData::Relocate { k_remaining, inc, new_copies, range} => {
                 let k = self.get_current_k();
                 if *inc { // case 'join'
                     let mut records_writer = self.records.write().unwrap();
@@ -538,7 +538,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: true, new_copies: None }
+                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: true, new_copies: None, range: None }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -557,7 +557,14 @@ impl Node  {
                         } 
                     }
                 } // release write locks here
-
+                    let range_to_transfer = self.get_replica_ranges();
+                    if let Some(range) = range {
+                        let mut replica_writer = self.replication.write().unwrap();
+                        let ranges = &mut replica_writer.replica_ranges;
+                        ranges.merge_at(*k_remaining as usize);
+                        ranges.insert_head(range.clone());
+                        
+                    }
                     // create one more replica manager for last copies
                     if let Some(copies) = new_copies { 
                         for copy in copies.iter(){
@@ -573,7 +580,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: false, new_copies: Some(to_transfer) }
+                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: false, new_copies: Some(to_transfer), range: Some(range_to_transfer.get_head()) }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -647,10 +654,11 @@ impl Node  {
             }
             
             // TODO! Test this
+            let ranges = self.get_replica_ranges();
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas) }
+                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: Some(ranges.get_head()) }
             );
 
             self.send_msg(self.get_succ(), &rel_msg);
@@ -658,6 +666,10 @@ impl Node  {
         // delete all records 
         if let Ok(mut map) = self.records.write() {
             map.clear();
+        }
+
+        if let Ok(mut replica) = self.replication.write() {
+            replica.replica_ranges.clear();
         }
         // change status and inform user
         self.set_status(false);

@@ -205,8 +205,20 @@ where
         self.replication_vector.iter()
     }
 
+    pub fn get_head(&self) -> Range<T> {
+        self.replication_vector[0]
+    }
+
+    pub fn get_tail(&self) -> Range<T> {
+        self.replication_vector[self.replication_vector.len()-1]
+    }
+
     pub fn insert(&mut self, range: Range<T>) {
         self.replication_vector.push(range);
+    }
+
+    pub fn insert_head(&mut self, range: Range<T>) {
+        self.replication_vector.insert(0, range);
     }
 
     pub fn pop_head(&mut self) {
@@ -235,6 +247,27 @@ where
             }
         }
         -1
+    }
+
+    pub fn merge_at(&mut self, idx: usize) {
+        if idx == 0 && self.replication_vector.len() > 0 {
+            self.replication_vector.remove(idx);
+            return;
+        } else if idx == self.replication_vector.len() {
+            return;
+        }
+        let mut merged_range = Range::new(self.replication_vector[idx-1].lower, 
+                                          self.replication_vector[idx].upper, 
+                                          self.replication_vector[idx-1].lc, 
+                                          self.replication_vector[idx].uc);
+        
+        self.replication_vector.insert(idx-1, merged_range);
+        self.replication_vector.remove(idx);
+        self.replication_vector.remove(idx+1);
+    }
+
+    pub fn clear(&mut self) {
+        self.replication_vector.clear();
     }
 }
    

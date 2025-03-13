@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::{node::{NodeInfo,ReplicationConfig}, utils::HashType, utils::Item};
+use crate::{node::{NodeInfo,ReplicationConfig}, utils::HashType, utils::Item, utils::Range};
 
 use serde::{Deserialize,Serialize};
 
@@ -56,7 +56,7 @@ pub enum MsgData {
     Overlay { },
     FwOverlay { peers: Vec<NodeInfo> },
     Reply { reply: String },
-    Relocate { k_remaining:u8, inc: bool, new_copies: Option<Vec<Item>> } 
+    Relocate { k_remaining:u8, inc: bool, new_copies: Option<Vec<Item>>, range: Option<Range<HashType>> } 
 }
 
 impl Message {
