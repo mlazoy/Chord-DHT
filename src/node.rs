@@ -3,6 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
+use num_traits::Bounded;
 use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::{Read,Write};
@@ -14,6 +15,7 @@ use crate::messages::{Message, MsgType, MsgData};
 use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item, Range, UnionRange};
 use crate::network::{ConnectionHandler, Server};
 use crate::NUM_THREADS; 
+use crate::utils;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -119,7 +121,7 @@ impl Node  {
 
         let init_replication = ReplicationConfig {
             replication_factor: _k_repl.unwrap_or(0),
-            replica_ranges: Vec::new(),           
+            replica_ranges: UnionRange::new(),           
             replication_mode: _m_repl.unwrap_or(Consistency::Eventual),
         };
         
@@ -187,8 +189,8 @@ impl Node  {
         self.info
     }
 
-    fn get_replica_managers(&self) -> Vec<HashType> {
-        self.replication.read().unwrap().replica_managers.to_vec()
+    fn get_replica_ranges(&self) -> UnionRange<HashType> {
+        self.replication.read().unwrap().replica_ranges.clone()
     }
 
     fn get_consistency(&self) -> Consistency {
@@ -202,7 +204,7 @@ impl Node  {
     // dynamically adjusts replication factor when online nodes are less than k
     fn get_current_k(&self) -> u8 {
         let k = self.replication.read().unwrap().replication_factor;
-        std::cmp::min(self.get_replica_managers().len() as u8, k)
+        std::cmp::min(self.get_replica_ranges().get_size() as u8, k)
     }
 
     fn insert_aux(&self, key: HashType, new_record: &Item) {
@@ -228,21 +230,16 @@ impl Node  {
     }
 
     fn is_responsible(&self, key: &HashType) -> bool {
-        // get read locks first 
-        let prev_rd = self.get_prev();
-        let succ_rd = self.get_succ();
-        if prev_rd.is_none() || succ_rd.is_none() {
-            return true;
-        }
-        let prev_id = prev_rd.unwrap().id;
-         // Check if this node is responsible for the key
-        if prev_id < self.get_id() {
-            // Normal case: key falls within (prev, self]
-            *key > prev_id && *key <= self.get_id()
-        } else {
-            // Wrapped case: previous is greater due to ring wrap-around
-            *key > prev_id || *key <= self.get_id()
-        }
+        let replica_ranges = self.get_replica_ranges();
+        let my_range = replica_ranges.get_my_range();
+        if my_range.in_range(*key) { true }
+        else { false }
+    }
+
+    // returns -1 if not a replica manager, otherwise the replica_idx of key in this node
+    fn is_replica_manager(&self, key:&HashType) -> i16 {
+        let replica_reader = self.get_replica_ranges();
+        return replica_reader.is_subset(*key);
     }
 
     /* used to check whether a key should be passed to successor or predecessor node
@@ -251,7 +248,6 @@ impl Node  {
     fn maybe_next_responsible(&self, key: &HashType) -> bool {
         let succ_rd = self.get_succ();
         let succ_id = succ_rd.unwrap().id;
-        // Check if the successor node is responsible for the key
         if self.get_id() < succ_id {
             // Normal case: key falls within (self, any forward successor]
             *key > self.get_id() 
@@ -259,12 +255,6 @@ impl Node  {
             // Wrapped case
             *key > self.get_id() || *key <= succ_id
         }
-    }
-
-    fn is_replica_manager(&self, key:&HashType) -> i16 {
-        let replication_reader = self.replication.read().unwrap();
-        let replica_range_reader = replication_reader.replica_ranges;
-        return replica_range_reader.is_subset(key);
     }
 
     fn relocate_replicas(&self) {
@@ -317,6 +307,17 @@ impl Node  {
             bootstrap_node.send_msg(&join_msg);
         } 
         else {
+            // initialise key range
+            {
+                let mut replication_writer = self.replication.write().unwrap();
+                let ranges = &mut replication_writer.replica_ranges;
+                let full_range = Range::new(
+                <HashType as Bounded>::min_value(), 
+                <HashType as Bounded>::max_value(), 
+                true, 
+                true);
+                ranges.insert(full_range);
+            }
             // bootstrap node just changes its status
             self.set_status(true);
             let user_msg = Message::new(
@@ -354,18 +355,30 @@ impl Node  {
                 if self.is_responsible(&id) { 
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
 
-                    // update my key ranges
-                    let new_range = Range::new(id, self.get_id(), false, true);
-                    let new_replica_range = Range::new(prev_rd.id, id,false, true);
+                    // define new and update my key ranges
+                    let transferred_ranges: UnionRange<HashType>;
                     {
-                        let replica_writer = self.replication.write().unwrap();
-                        let mut ranges = replica_writer.replica_ranges;
-                        ranges.push(new_replica_range);
-                        ranges.push(new_range);
-                        while ranges.get_size() > max_k {
-                            ranges.pop(0);
+                        let mut replica_writer = self.replication.write().unwrap();
+                        let ranges = &mut replica_writer.replica_ranges;
+                        // remove last set and split it to 2
+                        ranges.pop_tail();
+                        let new_replica_range = Range::new(prev_rd.unwrap().id, id,false, true);
+                        ranges.insert(new_replica_range);
+                        // save this to transfer later
+                        transferred_ranges = ranges.clone();
+                        
+                        let new_range = Range::new(id, self.get_id(), false, true);
+                        ranges.insert(new_range);
+                        while ranges.get_size() > max_k as usize {
+                            ranges.pop_head();
                         }
                     } // release replica locks...
+
+                    let replica_config = ReplicationConfig {
+                        replication_factor : max_k,
+                        replication_mode : self.get_consistency(),
+                        replica_ranges : transferred_ranges
+                    };
 
                     // update always locally 
                     self.print_debug_msg(&format!("Updating previous locally to {}", new_node.unwrap()));
@@ -381,15 +394,6 @@ impl Node  {
                             } 
                         }
                     } // drop locks here
-
-                    // pass all key_renges to new previous
-                    let my_key_ranges = self.get_replica_managers();
-
-                    let replica_config = ReplicationConfig {
-                        replication_factor: max_k,
-                        replication_mode: self.get_consistency(),
-                        replica_ranges: my_key_ranges
-                    };
 
                     // send a compact message with new neighbours, all new records and replica managers
                     let ack_msg = Message::new(
@@ -468,9 +472,9 @@ impl Node  {
                     replication_writer.replication_factor = replica_config.replication_factor;
                     replication_writer.replication_mode = replica_config.replication_mode;
                     // get replica managers assert vector is empty in this point
-                    let manager_writer = &mut replication_writer.replica_managers;
-                    for id in &replica_config.replica_managers{
-                        manager_writer.push(*id);
+                    let manager_writer = &mut replication_writer.replica_ranges;
+                    for id in replica_config.replica_ranges.iter() {
+                        manager_writer.insert(*id);
                     }
                 } // release replica locks here
 
@@ -1603,7 +1607,7 @@ impl fmt::Display for ReplicationConfig {
         write!(
             f,
             "Replication [ k: {}, consistency: {:?}, managers: {:?}]",
-            self.replication_factor, self.replication_mode, self.replica_managers
+            self.replication_factor, self.replication_mode, self.replica_ranges
         )
     }
 }

@@ -192,49 +192,55 @@ pub struct UnionRange<T> {
 
 impl<T> UnionRange<T>
 where
-    T: PartialOrd + PartialEq + Copy + Bounded,
+    T: PartialOrd + PartialEq + Copy 
 {
 
-    pub fn new(ranges: Vec<Range<T>>) -> Self {
+    pub fn new() -> Self {
         UnionRange {
-            replication_vector: ranges
+            replication_vector: Vec::new()
         }
     }
 
-    /* returns -1 if `number` is not in any range;
-        otherwise returns the relative position (index) of the subset it belongs to. */
-    pub fn is_subset(&self, number: T) -> i16 {
-        let len = self.replication_vector.len();
-        if len > 1 {
-            wrap = 0;
-            for i in 0..len {
-                let prev = &self.replication_vector[i];
-                let next = &self.replication_vector[i + 1];
-                if prev.upper == T::max_value() && next.lower == T::min_value() && next.lc && next.uc {
-                    // wrap interval is (prev.lower, +INF) U [0, next.upper]
-                    wrap = 1;
-                    if prev.in_range(number) || next.in_range(number) {
-                        return i as i16;
-                    } else { // just skip next
-                        i += 1;
-                    }
-                } 
-                else if prev.in_range(number) { return (i - wrap) as i16; }   
+    pub fn iter(&self) -> impl Iterator<Item = &Range<T>> {
+        self.replication_vector.iter()
+    }
+
+    pub fn insert(&mut self, range: Range<T>) {
+        self.replication_vector.push(range);
+    }
+
+    pub fn pop_head(&mut self) {
+        self.replication_vector.remove(0);
+    }
+
+    pub fn pop_tail(&mut self) {
+        self.replication_vector.pop();
+    }
+
+    pub fn get_size(&self) -> usize {
+        self.replication_vector.len()
+    }
+
+    pub fn get_my_range(&self) -> Range<T> {
+        let last_idx = self.replication_vector.len()-1;
+        self.replication_vector[last_idx-1]
+    }
+
+    pub fn is_subset(&self, element: T ) -> i16 {
+        for (i, set) in self.replication_vector.iter().enumerate(){
+            if set.lower < set.upper { // normal case
+                if set.in_range(element) {
+                    return i as i16;
+                }
+            } else { // wrap-around set
+                if element > set.lower || element <= set.upper { // wrap-around case
+                    return i as i16;
+                }
             }
-        } 
-
-        else if self.replication_vector[0].in_range(number) {
-            return 0;
         }
-
         -1
     }
-
-    // wrapping creates 2 sets but must count as 1
-    pub fn get_size(&self) -> u8 {
-        // TODO! 
-        0
-    }
-
 }
+   
+
 
