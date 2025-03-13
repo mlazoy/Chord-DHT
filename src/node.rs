@@ -231,11 +231,8 @@ impl Node  {
 
     fn is_responsible(&self, key: &HashType) -> bool {
         let replica_ranges = self.get_replica_ranges();
-        if let Some(my_range) = replica_ranges.get_my_range() {
-            my_range.in_range(*key)
-        } else {
-            false 
-        }
+        if replica_ranges.is_subset(*key) == 0 { true }
+        else { false }
     }
 
     // returns -1 if not a replica manager, otherwise the replica_idx of key in this node

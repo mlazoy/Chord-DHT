@@ -221,19 +221,16 @@ where
         self.replication_vector.len()
     }
 
-    pub fn get_my_range(&self) -> Option<&Range<T>> {
-        self.replication_vector.last()
-    }
-
     pub fn is_subset(&self, element: T ) -> i16 {
-        for (i, set) in self.replication_vector.iter().enumerate(){
+        let rev_idx =  self.replication_vector.len() - 1;
+        for (i, set) in self.replication_vector.iter().enumerate().rev() {
             if set.lower < set.upper { // normal case
                 if set.in_range(element) {
-                    return i as i16;
+                    return (rev_idx - i) as i16;
                 }
             } else { // wrap-around set
                 if element > set.lower || element <= set.upper { // wrap-around case
-                    return i as i16;
+                    return (rev_idx - i) as i16;
                 }
             }
         }
