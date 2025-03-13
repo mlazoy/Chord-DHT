@@ -183,6 +183,10 @@ where
             || (self.uc && number == self.upper)
             || (self.lower < number && number < self.upper)
     }
+
+    pub fn get_bounds(&self) -> (T, T) {
+        (self.lower, self.upper)
+    }
 }
 
 #[derive(Debug, Clone , Serialize, Deserialize)]
@@ -218,7 +222,7 @@ where
     }
 
     pub fn insert_head(&mut self, range: Range<T>) {
-        self.replication_vector.insert(0, range);
+        self.replication_vector.insert(0,range);
     }
 
     pub fn pop_head(&mut self) {
@@ -269,6 +273,38 @@ where
     pub fn clear(&mut self) {
         self.replication_vector.clear();
     }
+
+    pub fn split_range(&mut self, new_key: T) {
+        let mut new_ranges = Vec::new();
+        let mut pos = None;
+
+        for (i, range) in self.replication_vector.iter().enumerate(){
+            if range.in_range(new_key) { // split here
+                let split_left = Range::new(
+                    range.lower,
+                    new_key,
+                    range.lc,
+                    true
+                );
+                let split_right = Range::new(
+                    new_key,
+                    range.upper,
+                    false,
+                    range.uc
+                );
+
+                new_ranges.push(split_left);
+                new_ranges.push(split_right);
+                pos =  Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = pos {
+            self.replication_vector.remove(idx);
+            self.replication_vector.splice(idx..idx, new_ranges); // Insert the new ones at the same position
+        }
+    }
+
 }
    
 

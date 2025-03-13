@@ -362,21 +362,27 @@ impl Node  {
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
 
                     // define new and update my key ranges
-                    let transferred_ranges: UnionRange<HashType>;
+                    let mut transferred_ranges: UnionRange<HashType>;
+                    let split_left = Range::new(prev_rd.unwrap().id, id,false, true);
+                    let split_right = Range::new(id, self.get_id(), false, true);
+
                     {
                         let mut replica_writer = self.replication.write().unwrap();
                         let ranges = &mut replica_writer.replica_ranges;
                         // remove last set and split it to 2
                         ranges.pop_tail();
-                        let new_replica_range = Range::new(prev_rd.unwrap().id, id,false, true);
-                        ranges.insert(new_replica_range);
+                        ranges.insert(split_left);
                         // save this to transfer later
                         transferred_ranges = ranges.clone();
                         
-                        let new_range = Range::new(id, self.get_id(), false, true);
-                        ranges.insert(new_range);
+                        ranges.insert(split_right);
                         while ranges.get_size() > max_k as usize {
                             ranges.pop_head();
+                        }
+
+                        // wrap replicas
+                        if transferred_ranges.get_size() < max_k as usize {
+                            transferred_ranges.insert_head(split_right);
                         }
                     } // release replica locks...
 
@@ -438,7 +444,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: None }
+                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: Some(split_left) }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -519,6 +525,8 @@ impl Node  {
         match data {
             MsgData::Relocate { k_remaining, inc, new_copies, range} => {
                 let k = self.get_current_k();
+                let max_k = self.max_replication();
+
                 if *inc { // case 'join'
                     let mut records_writer = self.records.write().unwrap();
                     let mut to_remove: Vec<HashType> = Vec::new();
@@ -531,6 +539,18 @@ impl Node  {
                     }
                     for key in to_remove.iter(){
                         records_writer.remove(key);
+                    }
+
+                    // update ranges 
+                    if let Some(split) = range {
+                        let mut replication_writer = self.replication.write().unwrap();
+                        let ranges = &mut replication_writer.replica_ranges;
+
+                        ranges.split_range(split.get_bounds().1);
+
+                        if ranges.get_size() > max_k as usize {
+                            ranges.pop_head();
+                        }
                     }
 
                     if *k_remaining > 0 {
