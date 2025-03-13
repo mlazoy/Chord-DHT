@@ -528,18 +528,20 @@ impl Node  {
                 let max_k = self.max_replication();
 
                 if *inc { // case 'join'
-                    let mut records_writer = self.records.write().unwrap();
-                    let mut to_remove: Vec<HashType> = Vec::new();
-                    for (key, item) in records_writer.iter_mut(){
-                        if item.replica_idx == k {
-                            to_remove.push(*key);
-                        } else if item.replica_idx > 0 && item.replica_idx < k {
-                            item.replica_idx += 1;
-                        } 
-                    }
-                    for key in to_remove.iter(){
-                        records_writer.remove(key);
-                    }
+                    {
+                        let mut records_writer = self.records.write().unwrap();
+                        let mut to_remove: Vec<HashType> = Vec::new();
+                        for (key, item) in records_writer.iter_mut(){
+                            if item.replica_idx == k {
+                                to_remove.push(*key);
+                            } else if item.replica_idx > 0 && item.replica_idx < k {
+                                item.replica_idx += 1;
+                            } 
+                        }
+                        for key in to_remove.iter(){
+                            records_writer.remove(key);
+                        }
+                    } // release locks
 
                     // update ranges 
                     if let Some(split) = range {
