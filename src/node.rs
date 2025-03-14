@@ -1,4 +1,3 @@
-use std::hash::RandomState;
 use std::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
@@ -204,7 +203,7 @@ impl Node  {
     // dynamically adjusts replication factor when online nodes are less than k
     fn get_current_k(&self) -> u8 {
         let k = self.replication.read().unwrap().replication_factor;
-        std::cmp::min(self.get_replica_ranges().get_size() as u8, k)
+        std::cmp::min(self.get_replica_ranges().get_size() as u8 , k) 
     }
 
     fn insert_aux(&self, key: HashType, new_record: &Item) {
@@ -230,13 +229,27 @@ impl Node  {
     }
 
     fn is_responsible(&self, key: &HashType) -> bool {
-        let replica_ranges = self.get_replica_ranges();
-        if replica_ranges.is_subset(*key) == 0 { true }
-        else { false }
+        // get read locks first 
+        let prev_rd = self.get_prev();
+        let succ_rd = self.get_succ();
+        if prev_rd.is_none() || succ_rd.is_none() {
+            return true;
+        }
+        let prev_id = prev_rd.unwrap().id;
+         // Check if this node is responsible for the key
+        if prev_id < self.get_id() {
+            // Normal case: key falls within (prev, self]
+            *key > prev_id && *key <= self.get_id()
+        } else {
+            // Wrapped case: previous is greater due to ring wrap-around
+            *key > prev_id || *key <= self.get_id()
+        }
     }
+
 
     // returns -1 if not a replica manager, otherwise the replica_idx of key in this node
     fn is_replica_manager(&self, key:&HashType) -> i16 {
+        if self.is_responsible(key) { return 0; }
         let replica_reader = self.get_replica_ranges();
         return replica_reader.is_subset(*key);
     }
@@ -306,20 +319,6 @@ impl Node  {
             bootstrap_node.send_msg(&join_msg);
         } 
         else {
-            // initialise key range
-            {
-                let mut replication_writer = self.replication.write().unwrap();
-                let ranges = &mut replication_writer.replica_ranges;
-                let full_range = Range::new(
-                <HashType as Bounded>::min_value(), 
-                <HashType as Bounded>::max_value(), 
-                true, 
-                true);
-                ranges.insert(full_range);
-
-                self.print_debug_msg(&format!("Initial key range: {:?}", ranges));
-            } //release replica locks
-            
             // bootstrap node just changes its status
             self.set_status(true);
 
@@ -361,30 +360,32 @@ impl Node  {
                 if self.is_responsible(&id) { 
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
 
-                    // define new and update my key ranges
-                    let mut transferred_ranges: UnionRange<HashType>;
-                    let split_left = Range::new(prev_rd.unwrap().id, id,false, true);
-                    let split_right = Range::new(id, self.get_id(), false, true);
-
+                    // define replica ranges for current and new node 
+                    let mut transferred_ranges = self.get_replica_ranges();
+                    let mut wrap = false;
+                    let new_range = Range::new(
+                        prev_rd.unwrap().id,
+                        id, 
+                        false, 
+                        true); 
+                    //Update current replica ranges 
                     {
-                        let mut replica_writer = self.replication.write().unwrap();
-                        let ranges = &mut replica_writer.replica_ranges;
-                        // remove last set and split it to 2
-                        ranges.pop_tail();
-                        ranges.insert(split_left);
-                        // save this to transfer later
-                        transferred_ranges = ranges.clone();
-                        
-                        ranges.insert(split_right);
-                        while ranges.get_size() > max_k as usize {
-                            ranges.pop_head();
+                        let mut replication_writer = self.replication.write().unwrap();
+                        let my_replica_ranges = &mut replication_writer.replica_ranges;
+                        my_replica_ranges.insert(new_range);   // add new node's key range
+                        if my_replica_ranges.get_size() == (max_k + 1) as usize { 
+                            my_replica_ranges.pop_head(); 
+                        } else {
+                            wrap = true;
+                            let wrap_range = Range::new(
+                                id,
+                                self.get_id(),
+                                false,
+                                true
+                            );
+                            transferred_ranges.insert(wrap_range); // wrap around
                         }
-
-                        // wrap replicas
-                        if transferred_ranges.get_size() < max_k as usize {
-                            transferred_ranges.insert_head(split_right);
-                        }
-                    } // release replica locks...
+                    } // release replica locks here 
 
                     let replica_config = ReplicationConfig {
                         replication_factor : max_k,
@@ -403,9 +404,18 @@ impl Node  {
                         for (key, item) in records_read.iter() {
                             if item.replica_idx > 0 || (item.replica_idx == 0 && !self.is_responsible(key)) {
                                 vec_items.push(item.clone());
+                                continue;
                             } 
+                            // TODO! check this 
+                            if wrap && item.replica_idx == 0 && self.is_responsible(key) {
+                                vec_items.push(Item {
+                                    replica_idx: 1, // Increment only replica_idx
+                                    ..item.clone() // Keep other fields unchanged
+                                });
+                            }
                         }
                     } // drop locks here
+
 
                     // send a compact message with new neighbours, all new records and replica managers
                     let ack_msg = Message::new(
@@ -440,14 +450,14 @@ impl Node  {
                     // forward replica relocation to successors
                     let k = self.get_current_k();
 
-                    if k > 1 {
+                    if k > 1 && succ_rd.unwrap().id != self.get_id() {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: Some(split_left) }
+                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: Some(new_range) }
                         );
 
-                        self.send_msg(self.get_succ(), &rel_msg);
+                        self.send_msg(succ_rd, &rel_msg);
                     }
 
                 }
@@ -484,9 +494,9 @@ impl Node  {
                     replication_writer.replication_factor = replica_config.replication_factor;
                     replication_writer.replication_mode = replica_config.replication_mode;
                     // get replica managers assert vector is empty in this point
-                    let manager_writer = &mut replication_writer.replica_ranges;
-                    for id in replica_config.replica_ranges.iter() {
-                        manager_writer.insert(*id);
+                    let ranges_writer = &mut replication_writer.replica_ranges;
+                    for range in replica_config.replica_ranges.iter() {
+                        ranges_writer.insert(*range);
                     }
                 } // release replica locks here
 
@@ -560,7 +570,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: true, new_copies: None, range: None }
+                            &MsgData::Relocate { k_remaining: *k_remaining-1, inc: true, new_copies: None, range: *range }
                         );
 
                         self.send_msg(self.get_succ(), &rel_msg);
@@ -688,7 +698,7 @@ impl Node  {
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas), range: Some(range) }
+                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: Some(range) }
             );
 
             self.send_msg(self.get_succ(), &rel_msg);

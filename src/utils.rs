@@ -246,7 +246,7 @@ where
     }
 
     pub fn is_subset(&self, element: T ) -> i16 {
-        let rev_idx =  self.replication_vector.len() - 1;
+        let rev_idx =  self.replication_vector.len();
         for (i, set) in self.replication_vector.iter().enumerate().rev() {
             if set.lower < set.upper { // normal case
                 if set.in_range(element) {
