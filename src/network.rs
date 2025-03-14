@@ -7,13 +7,15 @@ pub trait ConnectionHandler: Send + Sync {
 }
 
 pub struct Server<T: ConnectionHandler> {
-    handler: Arc<Mutex<T>>, // Arc<Mutex<T>> allows mutable access across threads
+    // handler: Arc<Mutex<T>>, 
+    handler : Arc<T>,
 }
 
 impl<T: ConnectionHandler + 'static> Server<T> {
     pub fn new(handler: T) -> Self {
         Self {
-            handler: Arc::new(Mutex::new(handler)),
+            //handler: Arc::new(Mutex::new(handler)),
+            handler: Arc::new(handler),
         }
     }
 
@@ -25,7 +27,7 @@ impl<T: ConnectionHandler + 'static> Server<T> {
                     let handler = Arc::clone(&self.handler);
                     pool.execute(move || {
                         // Lock the mutex to get mutable access
-                        let handler = handler.lock().unwrap();
+                        //let handler = handler.lock().unwrap();
                         handler.handle_request(stream);
                     });
                 }

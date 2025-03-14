@@ -1,3 +1,5 @@
+#![allow(dead_code, non_snake_case, unused_imports)]
+
 use std::env;
 use std::io::{self, Write, Read};
 use std::net::{TcpStream, Ipv4Addr, TcpListener};

@@ -14,6 +14,4 @@ threadpool = "1.8"
 lazy_static = "1.4"
 num-traits = "0.2"
 
-[build]
-rustflags = ["-A", "dead_code", "-A", "non_snake_case", "-A", "unused_imports"]
 

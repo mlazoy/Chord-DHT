@@ -1,3 +1,5 @@
+#![allow(dead_code, non_snake_case, unused_imports)]
+
 use std::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
@@ -1544,7 +1546,7 @@ impl Node  {
 }
 
 impl ConnectionHandler for Node {
-    fn handle_request(&self, mut stream: TcpStream) {
+    fn handle_request(&self, stream: TcpStream) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
@@ -1691,7 +1693,7 @@ impl fmt::Display for ReplicationConfig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Replication [ k: {}, consistency: {:?}, managers: {:?}]",
+            "Replication [ k: {}, consistency: {:?}, replica_ranges: {:?}]",
             self.replication_factor, self.replication_mode, self.replica_ranges
         )
     }

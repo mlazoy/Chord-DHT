@@ -1,3 +1,5 @@
+#![allow(dead_code, non_snake_case, unused_imports)]
+
 use std::net::Ipv4Addr;
 use std::env;
 
@@ -25,7 +27,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 2 {
-        eprintln!("Usage: {} [bootstrap <k> <m> |node| cli <command> [args]]", args[0]);
+        eprintln!("Usage: {} [bootstrap <k> <m> |node <n> | cli <command> [args]]", args[0]);
         return;
     }
 
@@ -67,15 +69,24 @@ fn main() {
 
         }
         "node" => {
-            let node_instance = node::Node::new(
-                &get_local_ip(), 
-                Some(API_PORT+1),     // test this
-                None, 
-                None,
-                Some(bootstrap_info));
-        
+            if args.len() < 3 {
+                panic!("Usage: {} node <n>", args[0]);
+            } else {
+                let n: u16 = match args[2].parse(){
+                    Ok(val) => val,
+                    Err(_) => panic!("Invalid parameter for n.\n")
+                };
+                
+                let node_instance = node::Node::new(
+                    &get_local_ip(), 
+                    Some(API_PORT+n),     // offset 
+                    None, 
+                    None,
+                    Some(bootstrap_info));
+            
 
-            node_instance.init();
+                node_instance.init();
+            }
         }
 
         "cli" => {

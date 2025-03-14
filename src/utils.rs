@@ -1,3 +1,5 @@
+#![allow(dead_code, non_snake_case, unused_imports)]
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest,Sha1};
 use std::fmt;
@@ -268,7 +270,7 @@ where
         } else if idx == self.replication_vector.len() {
             return;
         }
-        let mut merged_range = Range::new(self.replication_vector[idx-1].lower, 
+        let merged_range = Range::new(self.replication_vector[idx-1].lower, 
                                           self.replication_vector[idx].upper, 
                                           self.replication_vector[idx-1].lc, 
                                           self.replication_vector[idx].uc);
