@@ -700,10 +700,11 @@ impl Node  {
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: Some(range) }
+                &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas), range: Some(range) }
             );
-
-            self.send_msg(self.get_succ(), &rel_msg);
+            if self.get_succ().unwrap().id != self.get_id() {
+                self.send_msg(self.get_succ(), &rel_msg);
+            }
         }
         // delete all records 
         if let Ok(mut map) = self.records.write() {

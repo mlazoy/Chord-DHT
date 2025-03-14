@@ -267,7 +267,8 @@ where
         if idx == 0 && self.replication_vector.len() > 0 {
             self.replication_vector.remove(idx);
             return;
-        } else if idx == self.replication_vector.len() {
+        } else if idx >= self.replication_vector.len() {
+            println!("Index out of bounds");
             return;
         }
         let merged_range = Range::new(self.replication_vector[idx-1].lower, 
@@ -277,7 +278,7 @@ where
         
         self.replication_vector.insert(idx-1, merged_range);
         self.replication_vector.remove(idx);
-        self.replication_vector.remove(idx+1);
+        self.replication_vector.remove(idx);
     }
 
     pub fn clear(&mut self) {
