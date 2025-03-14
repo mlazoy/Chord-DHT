@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use num_traits::Bounded;
 use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::io::{Read,Write};
+use std::io::{Read,Write, BufReader};
 use serde_json::Value;
 use std::{thread, vec};
 use std::fmt;
@@ -1545,110 +1545,137 @@ impl Node  {
 
 impl ConnectionHandler for Node {
     fn handle_request(&self, mut stream: TcpStream) {
-        let peer_addr = stream.peer_addr().unwrap();
+        let peer_addr = match stream.peer_addr() {
+            Ok(addr) => addr,
+            Err(e) => {
+                eprintln!("Failed to get peer address: {}", e);
+                return;
+            }
+        };
+
         self.print_debug_msg(&format!("New message from {}", peer_addr));
-        
-        // let peer_ip: Ipv4Addr = match peer_addr.ip() {
-        //     std::net::IpAddr::V4(ipv4) => ipv4,  // Extract IPv4
-        //     std::net::IpAddr::V6(_) => {
-        //         panic!("Received IPv6 address, expected only IPv4");
-        //     }
-        // };
-                    
-        let mut buffer = [0; 1024]; 
-        let n = match stream.read(&mut buffer) {
-            Ok(size) => size,
-            Err(e) => {
-                eprintln!("Failed to read from stream: {}", e);
-                return;
-            }
-        };
-                    
-        // Convert the buffer to a string
-        let received_msg = String::from_utf8_lossy(&buffer[..n]);
-                    
-        // Deserialize the received JSON message
-        let json_value: Value = match serde_json::from_str(&received_msg) {
-            Ok(value) => value,
-            Err(e) => {
-                eprintln!("Failed to deserialize message: {:?} - {}", received_msg, e);
-                return;
-            }
-        };
 
-        // Convert Value to Message
-        let msg: Message = match serde_json::from_value(json_value) {
-            Ok(msg) => msg,
-            Err(e) => {
-                eprintln!("Failed to convert JSON value to Message: {}", e);
-                return;
-            }
-        };
-        self.print_debug_msg(&format!("Received: {}", msg));
+        let mut reader = BufReader::new(&stream);
+        let mut total_data = Vec::new();
+        let mut buffer = [0; 1024];
 
-            let sender_info = msg.extract_client();        
-            let msg_type = msg.extract_type();
-            let msg_data = msg.extract_data();
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    eprintln!("Connection closed by peer.");
+                    return;
+                }
+                Ok(n) => {
+                    total_data.extend_from_slice(&buffer[..n]);
+                    
+                    // Try to parse as JSON
+                    match serde_json::from_slice::<Value>(&total_data) {
+                        Ok(json_value) => {
+                            // Ensure the "size" field exists
+                            let total_size = match json_value.get("size").and_then(|v| v.as_u64()) {
+                                Some(size) => size as usize,
+                                None => {
+                                    eprintln!("Missing 'size' field in JSON");
+                                    return;
+                                }
+                            };
 
-            match msg_type {
-                MsgType::Join | MsgType::AckJoin => (),
-                _ => {
-                    if !self.get_status() {
-                        let error_msg = Message::new(
-                            MsgType::Reply,
-                            None,
-                            &MsgData::Reply { reply: format!("Node {} is offline", self.get_info())}
-                        );
-                        sender_info.unwrap().send_msg(&error_msg);
-                        return; 
+                            // Keep reading until we receive the expected number of bytes
+                            while total_data.len() < total_size {
+                                let mut chunk = vec![0; 1024];
+                                let bytes_read = match reader.read(&mut chunk) {
+                                    Ok(0) => break, // Connection closed
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        eprintln!("Error while reading from stream: {}", e);
+                                        return;
+                                    }
+                                };
+                                total_data.extend_from_slice(&chunk[..bytes_read]);
+                            }
+
+                            // Deserialize the complete JSON
+                            let full_json: Value = match serde_json::from_slice(&total_data) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    eprintln!("Failed to deserialize full JSON: {}", e);
+                                    return;
+                                }
+                            };
+
+                            // Convert JSON Value into Message struct
+                            let msg: Message = match serde_json::from_value(full_json) {
+                                Ok(msg) => msg,
+                                Err(e) => {
+                                    eprintln!("Failed to convert JSON value to Message: {}", e);
+                                    return;
+                                }
+                            };
+
+                            self.print_debug_msg(&format!("Received: {}", msg));
+
+                            let sender_info = msg.extract_client();
+                            let msg_type = msg.extract_type();
+                            let msg_data = msg.extract_data();
+
+                            match msg_type {
+                                MsgType::Join | MsgType::AckJoin => (),
+                                _ => {
+                                    if !self.get_status() {
+                                        let error_msg = Message::new(
+                                            MsgType::Reply,
+                                            None,
+                                            &MsgData::Reply {
+                                                reply: format!("Node {} is offline", self.get_info()),
+                                            },
+                                        );
+                                        if let Some(sender) = sender_info {
+                                            sender.send_msg(&error_msg);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+
+                            match msg_type {
+                                MsgType::Join => self.join_ring(sender_info),
+                                MsgType::FwJoin => self.handle_join(sender_info, &msg_data),
+                                MsgType::AckJoin => self.handle_ack_join(sender_info, &msg_data),
+                                MsgType::Update => self.handle_update(&msg_data),
+                                MsgType::Quit => self.handle_quit(sender_info, &msg_data),
+                                MsgType::Query => self.handle_query(sender_info, &msg_data),
+                                MsgType::FwQuery => self.handle_fw_query(sender_info, &msg_data),
+                                MsgType::QueryAll => self.handle_query_all(sender_info, &msg_data),
+                                MsgType::FwQueryAll => self.handle_fw_query_all(sender_info, &msg_data),
+                                MsgType::Insert => self.handle_insert(sender_info, &msg_data),
+                                MsgType::FwInsert => self.handle_fw_insert(sender_info, &msg_data),
+                                MsgType::AckInsert => self.handle_ack_insert(&msg_data),
+                                MsgType::Delete => self.handle_delete(sender_info, &msg_data),
+                                MsgType::FwDelete => self.handle_fw_delete(sender_info, &msg_data),
+                                MsgType::AckDelete => self.handle_ack_delete(&msg_data),
+                                MsgType::Overlay => self.handle_overlay(sender_info, &msg_data),
+                                MsgType::FwOverlay => self.handle_fw_overlay(sender_info, &msg_data),
+                                MsgType::Relocate => self.handle_relocate(&msg_data),
+                                _ => eprintln!("Invalid message type: {:?}", msg_type),
+                            }
+
+                            return; // Successfully processed the message
+                        }
+                        Err(_) => {
+                            // JSON is incomplete; continue reading more bytes
+                            continue;
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("Failed to read from stream: {}", e);
+                    return;
+                }
             }
-
-            match msg_type {
-                MsgType::Join => self.join_ring(sender_info),
-                
-                MsgType::FwJoin => self.handle_join(sender_info, &msg_data),
-                
-                MsgType::AckJoin => self.handle_ack_join(sender_info, &msg_data),
-                
-                // no sender needed cause it's an internal process
-                MsgType::Update => self.handle_update(&msg_data), 
-
-                MsgType::Quit => self.handle_quit(sender_info, &msg_data),  
-
-                MsgType::Query => self.handle_query(sender_info, &msg_data),
-
-                MsgType::FwQuery => self.handle_fw_query(sender_info, &msg_data),
-
-                MsgType::QueryAll => self.handle_query_all(sender_info, &msg_data),
-
-                MsgType::FwQueryAll => self.handle_fw_query_all(sender_info, &msg_data),
-
-                MsgType::Insert => self.handle_insert(sender_info, &msg_data),
-
-                MsgType::FwInsert => self.handle_fw_insert(sender_info, &msg_data),
-
-                MsgType::AckInsert => self.handle_ack_insert(&msg_data), 
-
-                MsgType::Delete => self.handle_delete(sender_info, &msg_data),
-                   
-                MsgType::FwDelete => self.handle_fw_delete(sender_info, &msg_data),
-                
-                MsgType::AckDelete=> self.handle_ack_delete(&msg_data),
-
-                MsgType::Overlay => self.handle_overlay(sender_info, &msg_data),
-                    
-                MsgType::FwOverlay => self.handle_fw_overlay(sender_info, &msg_data),
-
-                MsgType::Relocate => self.handle_relocate(&msg_data),
-
-                _ => eprintln!("Invalid message type: {:?}", msg_type) 
-            }
-            
-        } 
-       
+        }
     }
+       
+}
 
 impl fmt::Display for NodeInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
