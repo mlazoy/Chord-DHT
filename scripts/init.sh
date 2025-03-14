@@ -6,9 +6,19 @@ VM_COUNT=5
 # Define the bootstrap node (VM 1)
 BOOTSTRAP_NODE=1
 
-# Test parameters
-k=0
+# Default parameters
+k=1
 m=0
+
+if [[ $# -ge 1 ]]; then
+    k=$1
+fi
+
+if [[ $# -ge 2 ]]; then
+    m=$2
+fi
+
+echo "Using parameters: k=$k, m=$m"
 
 for i in $(seq 1 $VM_COUNT); do
   if [ $i -eq $BOOTSTRAP_NODE ]; then

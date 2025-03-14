@@ -1,5 +1,6 @@
 #!/bin/bash
 
+DATA_DIR="../data/insert/"
 # Define the IP addresses and ports
 declare -A IP_PORT_MAP
 IP_PORT_MAP=(
