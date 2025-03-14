@@ -149,7 +149,7 @@ pub fn run_cli() {
         "overlay" => {
             let request = Message::new(
                 MsgType::Overlay,
-                Some(&NodeInfo::new(node_ip, node_port + 42)),
+                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
                 &MsgData::Overlay {  }
             );
             
