@@ -223,6 +223,54 @@ pub fn run_cli() {
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
+        "requests" => {
+            if args.len() < 5 {
+                println!("Usage:");
+                println!("cargo run cli <ip> <port> requests <file>");
+                process::exit(1);
+            }
+
+            let filename = args[5].as_str();
+            let file_content = std::fs::read_to_string(filename).expect("Failed to read file");
+            let response_filename = format!("{}_response.txt", filename);
+            let mut response_file = std::fs::File::create(response_filename).expect("Failed to create response file");
+            let lines: Vec<&str> = file_content.lines().collect();
+            for line in lines {
+                let request: Vec<&str> = line.split(", ").collect();
+                match request[0] {
+                    "insert" => {
+                        let request = Message::new(
+                            MsgType::Insert,
+                            Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
+                            &MsgData::Insert { key: request[1].to_string(), value: request[2].to_string() }
+                        );
+                        match send_request(node_ip, node_port, &request) {
+                            Ok(response) => println!("{}", response),
+                            Err(e) => eprintln!("Error: {}", e),
+                        }
+                    }
+                    "query" => {
+                        let request = Message::new(
+                            MsgType::Query,
+                            Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
+                            &MsgData::Query { key: request[1].to_string() }
+                        );
+                        match send_request(node_ip, node_port, &request) {
+                            Ok(response) => { 
+                                println!("{}", response);
+                                writeln!(response_file, "Request: {} | Response: {}", line, response)
+                                .expect("Failed to write to response file");
+                            }
+                            ,
+                            Err(e) => eprintln!("Error: {}", e),
+                        }
+                    }
+                    _ => {
+                        eprintln!("Invalid request type: {}", request[0]);
+                    }
+                }
+            }
+        }
         "help" => {
             println!("Options:");
             println!("  <ip>                  => IP address of the node to connect to");

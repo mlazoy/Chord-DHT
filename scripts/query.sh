@@ -4,16 +4,16 @@ DATA_DIR="../data/queries/"
 # Define the IP addresses and ports
 declare -A IP_PORT_MAP
 IP_PORT_MAP=(
-    ["10.0.24.44:8000"]="query_00_part.txt"
-    ["10.0.24.44:8001"]="query_01_part.txt"
-    ["10.0.24.219:8001"]="query_02_part.txt"
-    ["10.0.24.219:8002"]="query_03_part.txt"
-    ["10.0.24.212:8001"]="query_04_part.txt"
-    ["10.0.24.212:8002"]="query_05_part.txt"
-    ["10.0.24.124:8001"]="query_06_part.txt"
-    ["10.0.24.124:8002"]="query_07_part.txt"
-    ["10.0.24.206:8001"]="query_08_part.txt"
-    ["10.0.24.206:8002"]="query_09_part.txt"
+    ["10.0.24.44:8000"]="query_00.txt"
+    ["10.0.24.44:8001"]="query_01.txt"
+    ["10.0.24.219:8001"]="query_02.txt"
+    ["10.0.24.219:8002"]="query_03.txt"
+    ["10.0.24.212:8001"]="query_04.txt"
+    ["10.0.24.212:8002"]="query_05.txt"
+    ["10.0.24.124:8001"]="query_06.txt"
+    ["10.0.24.124:8002"]="query_07.txt"
+    ["10.0.24.206:8001"]="query_08.txt"
+    ["10.0.24.206:8002"]="query_09.txt"
 )
 
 # Function to get the correct query file for the IP and port combination
