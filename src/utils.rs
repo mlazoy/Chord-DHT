@@ -26,7 +26,7 @@ pub trait DebugMsg {
 impl<T> DebugMsg for T {}
 
 // type synonym for actual hash returned from SHA-1
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HashType(pub [u8; 20]); 
 
 

@@ -2,8 +2,8 @@
 
 use tokio::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
-use std::collections::BTreeMap;
-use tokio::sync::RwLock;
+use std::collections::{HashMap,BTreeMap};
+use tokio::sync::{Notify,RwLock};
 use std::sync::Arc;
 use num_traits::Bounded;
 use serde::{Serialize, Deserialize};
@@ -43,10 +43,11 @@ pub struct Node {
                                                             no lock needed - is immutable */                              
     previous : Arc<RwLock<Option<NodeInfo>>>,                  
     successor : Arc<RwLock<Option<NodeInfo>>>, 
-    bootstrap : Option<NodeInfo>,                           // no lock because it is read only
-    replication: Arc<RwLock<ReplicationConfig>>,             // wraps k, m, ids             
-    records : Arc<RwLock<BTreeMap<HashType, Item>>>,        // list of hashed records per node
-    status: Arc<AtomicBool>                                 // denotes if server is alive
+    bootstrap : Option<NodeInfo>,                               // no lock because it is read only
+    replication: Arc<RwLock<ReplicationConfig>>,                // wraps k, m, ids             
+    records : Arc<RwLock<BTreeMap<HashType, Item>>>,            // list of hashed records per node
+    pendings : Arc<RwLock<HashMap<HashType, Arc<Notify>>>>,    // keeps track of blocked queries at head
+    status: Arc<AtomicBool>                                     // denotes if server is alive
 }
 
 impl NodeInfo {
@@ -137,6 +138,7 @@ impl Node  {
             bootstrap: _boot_ref,
             replication: Arc::new(RwLock::new(init_replication)),
             records: Arc::new(RwLock::new(BTreeMap::new())),
+            pendings: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(AtomicBool::new(false)) 
         }
     }
@@ -149,6 +151,7 @@ impl Node  {
             bootstrap: self.bootstrap,
             replication: self.replication.clone(),
             records: Arc::clone(&self.records),
+            pendings : Arc::clone(&self.pendings),
             status: Arc::clone(&self.status)
         }
     }
@@ -808,6 +811,7 @@ impl Node  {
                                 replica_idx: 0,
                                 pending:true
                             };
+
                             self.insert_aux(key_hash, &new_item).await;
 
                             if self.get_current_k().await > 0 {
@@ -893,6 +897,7 @@ impl Node  {
                             replica_idx: *replica as u8, 
                             pending: true
                         };
+                        // no need to keep pending lists on intermediate nodes
                         self.insert_aux(key_hash, &new_item).await;
 
                         if (*replica as u8) < self.get_current_k().await {
@@ -952,6 +957,12 @@ impl Node  {
 
                             self.send_msg(self.get_prev().await, &fw_ack).await;
                         }
+                        else if record.replica_idx == 0  {
+                            // TODO! notify waiting readers on this key
+                            let waiting = self.pendings.read().await;
+                            
+
+                        }
                     }
                 }
                 _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
@@ -1006,53 +1017,62 @@ impl Node  {
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
 
                         if self.is_responsible(&key_hash).await {
-                            // create a busy-waiting loop to periodaclly check pending
-                            loop {  // TODO! Maybe better to use CondVar ...?
-                                let record_reader = self.records.read().await;
-                                let record = record_reader.get(&key_hash);
-                                match record {
-                                    Some(exist) => {
-                                        if exist.pending == true {
-                                            self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", key_hash));
-                                            thread::sleep(std::time::Duration::from_millis(100));
-                                            // retry after wake up
-                                            continue;
-                                        } 
-                                        else {
-                                            if exist.replica_idx < self.get_current_k().await {
-                                                let fw_msg = Message::new(
-                                                    MsgType::FwQuery,
-                                                    client,
-                                                    &MsgData::FwQuery { key: key_hash, forward_tail: true }
-                                                );
-                                                self.send_msg(succ, &fw_msg).await;
-                                                return;
-                                            } 
-                                            else {
-                                                let user_msg = Message::new(
-                                                    MsgType::Reply,
-                                                    None,
-                                                    &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
-                                                );
-
-                                                client.unwrap().send_msg(&user_msg).await;
-                                                return;
-                                            }
+                            let record_reader = self.records.read().await;
+                            let record = record_reader.get(&key_hash);
+                            match record {
+                                Some(exist) => {
+                                    if exist.pending == true {
+                                        self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", key_hash));
+                                        // add this item on pending list 
+                                        let notify = Arc::new(Notify::new());  // Create a new notifier
+                                        {
+                                            let mut notifiers = self.pendings.write().await;
+                                            notifiers.insert(key_hash.clone(), notify.clone());  
                                         }
-                                    }
-                                    
-                                    _ => {
+                                        // go to sleep and wait to get notified ...
+                                        //drop(record_reader); // release locks first
+                                        self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", exist.title));
+                                        notify.notified().await;
+                                        self.print_debug_msg(&format!("Item {} is ready. Waking up...", exist.title));
+
+                                        // grab the lock again ...
+                                        // same logic as else part
+                                        
+                                    } 
+                                    if exist.replica_idx < self.get_current_k().await {
+                                        let fw_msg = Message::new(
+                                            MsgType::FwQuery,
+                                            client,
+                                            &MsgData::FwQuery { key: key_hash, forward_tail: true }
+                                        );
+                                        self.send_msg(succ, &fw_msg).await;
+                                        return;
+                                    } 
+                                    else {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
+                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg).await;
                                         return;
                                     }
+                                    
+                                }
+                                
+                                _ => {
+                                    let user_msg = Message::new(
+                                        MsgType::Reply,
+                                        None,
+                                        &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
+                                    );
+
+                                    client.unwrap().send_msg(&user_msg).await;
+                                    return;
                                 }
                             }
+                            
                         }
                         else {
                             let fw_query = Message::new(
