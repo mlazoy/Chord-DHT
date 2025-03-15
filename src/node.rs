@@ -1,6 +1,7 @@
 #![allow(dead_code, non_snake_case, unused_imports)]
 
 use tokio::net::{TcpListener, TcpStream};
+use std::future::Pending;
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::{HashMap,BTreeMap};
 use tokio::sync::{Notify,RwLock};
@@ -8,7 +9,6 @@ use std::sync::Arc;
 use num_traits::Bounded;
 use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-// use std::io::{Read,Write, BufReader};
 use serde_json::Value;
 use std::{thread, vec};
 use async_trait::async_trait;
@@ -805,11 +805,13 @@ impl Node  {
                            It forwards the insert request to all other replica managers without replying to client.
                            Meanwhile the 'pending' field remains true until an ack is received. */
                         if self.is_responsible(&key_hash).await {
+                            let k = self.get_current_k().await;
+                            let is_pending =  k > 0 ; // no need for pending head == tail
                             let new_item = Item{
                                 title: key.clone(),
                                 value: value.clone(),
                                 replica_idx: 0,
-                                pending:true
+                                pending: is_pending
                             };
 
                             self.insert_aux(key_hash, &new_item).await;
@@ -823,7 +825,8 @@ impl Node  {
                                 );
                                 self.send_msg(succ, &fw_ins).await;
                             }
-                        } else {
+                        } 
+                        else {
                             let fw_ins = Message::new(
                                 MsgType::Insert,
                                 client,
@@ -947,21 +950,26 @@ impl Node  {
                     let mut record_writer = self.records.write().await;
                     if let Some(record) = record_writer.get_mut(&key) {
                         record.pending = false;
+                        let curr_idx = record.replica_idx;
 
-                        if record.replica_idx > 0 {
+                        drop(record_writer);
+
+                        if curr_idx > 0 {
                             let fw_ack = Message::new(
                                 MsgType::AckInsert,
                                 None,
                                 &MsgData::AckInsert { key: *key }
                             );
 
+
                             self.send_msg(self.get_prev().await, &fw_ack).await;
                         }
-                        else if record.replica_idx == 0  {
+                        else if curr_idx == 0  {
                             // notify waiting readers on this key
                             let mut waiting_list = self.pendings.write().await;
 
                             if let Some(notify) = waiting_list.get(&key) {
+                                self.print_debug_msg("Sent a notification to ");
                                 notify.notify_waiters();  
                                 // remove this from queue
                                 waiting_list.remove(&key);
@@ -1025,6 +1033,7 @@ impl Node  {
                                 let record = record_reader.get(&key_hash);
                                 match record {
                                     Some(exist) => {
+                                        let exist_clone = exist.clone(); // to drop lock safely and still have access on fields
                                         if exist.pending == true {
                                             self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", key_hash));
                                             // add this item on pending list 
@@ -1034,13 +1043,14 @@ impl Node  {
                                                 notifiers.insert(key_hash.clone(), notify.clone());  
                                             }
                                             // go to sleep and wait to get notified ...
-                                            //drop(record_reader); // release locks first
-                                            self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", exist.title));
+                                            drop(record_reader); // release locks first
+
+                                            self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", exist_clone.title));
                                             notify.notified().await;
-                                            self.print_debug_msg(&format!("Item {} is ready. Waking up...", exist.title));
+                                            self.print_debug_msg(&format!("Item {} is ready. Waking up...", exist_clone.title));
                                             continue;
                                         } 
-                                        else if exist.replica_idx < self.get_current_k().await {
+                                        else if exist_clone.replica_idx < self.get_current_k().await {
                                             let fw_msg = Message::new(
                                                 MsgType::FwQuery,
                                                 client,
@@ -1078,7 +1088,7 @@ impl Node  {
                         }
                         else {
                             let fw_query = Message::new(
-                                MsgType::FwQuery,
+                                MsgType::Query,
                                 client,
                                 &MsgData::Query { key: key.clone() }
                             ); 
