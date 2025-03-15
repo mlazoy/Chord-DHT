@@ -958,10 +958,14 @@ impl Node  {
                             self.send_msg(self.get_prev().await, &fw_ack).await;
                         }
                         else if record.replica_idx == 0  {
-                            // TODO! notify waiting readers on this key
-                            let waiting = self.pendings.read().await;
-                            
+                            // notify waiting readers on this key
+                            let mut waiting_list = self.pendings.write().await;
 
+                            if let Some(notify) = waiting_list.get(&key) {
+                                notify.notify_waiters();  
+                                // remove this from queue
+                                waiting_list.remove(&key);
+                            }
                         }
                     }
                 }
@@ -1017,62 +1021,61 @@ impl Node  {
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
 
                         if self.is_responsible(&key_hash).await {
-                            let record_reader = self.records.read().await;
-                            let record = record_reader.get(&key_hash);
-                            match record {
-                                Some(exist) => {
-                                    if exist.pending == true {
-                                        self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", key_hash));
-                                        // add this item on pending list 
-                                        let notify = Arc::new(Notify::new());  // Create a new notifier
-                                        {
-                                            let mut notifiers = self.pendings.write().await;
-                                            notifiers.insert(key_hash.clone(), notify.clone());  
-                                        }
-                                        // go to sleep and wait to get notified ...
-                                        //drop(record_reader); // release locks first
-                                        self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", exist.title));
-                                        notify.notified().await;
-                                        self.print_debug_msg(&format!("Item {} is ready. Waking up...", exist.title));
+                            loop {
+                                let record_reader = self.records.read().await;
+                                let record = record_reader.get(&key_hash);
+                                match record {
+                                    Some(exist) => {
+                                        if exist.pending == true {
+                                            self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", key_hash));
+                                            // add this item on pending list 
+                                            let notify = Arc::new(Notify::new());  // Create a new notifier
+                                            {
+                                                let mut notifiers = self.pendings.write().await;
+                                                notifiers.insert(key_hash.clone(), notify.clone());  
+                                            }
+                                            // go to sleep and wait to get notified ...
+                                            //drop(record_reader); // release locks first
+                                            self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", exist.title));
+                                            notify.notified().await;
+                                            self.print_debug_msg(&format!("Item {} is ready. Waking up...", exist.title));
+                                            continue;
+                                        } 
+                                        else if exist.replica_idx < self.get_current_k().await {
+                                            let fw_msg = Message::new(
+                                                MsgType::FwQuery,
+                                                client,
+                                                &MsgData::FwQuery { key: key_hash, forward_tail: true }
+                                            );
+                                            self.send_msg(succ, &fw_msg).await;
+                                            return;
+                                        } 
+                                        else {
+                                            let user_msg = Message::new(
+                                                MsgType::Reply,
+                                                None,
+                                                &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
+                                            );
 
-                                        // grab the lock again ...
-                                        // same logic as else part
+                                            client.unwrap().send_msg(&user_msg).await;
+                                            return;
+                                        }
                                         
-                                    } 
-                                    if exist.replica_idx < self.get_current_k().await {
-                                        let fw_msg = Message::new(
-                                            MsgType::FwQuery,
-                                            client,
-                                            &MsgData::FwQuery { key: key_hash, forward_tail: true }
-                                        );
-                                        self.send_msg(succ, &fw_msg).await;
-                                        return;
-                                    } 
-                                    else {
+                                    }
+                                    
+                                    _ => {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
+                                            &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg).await;
                                         return;
                                     }
-                                    
                                 }
                                 
-                                _ => {
-                                    let user_msg = Message::new(
-                                        MsgType::Reply,
-                                        None,
-                                        &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
-                                    );
-
-                                    client.unwrap().send_msg(&user_msg).await;
-                                    return;
-                                }
                             }
-                            
                         }
                         else {
                             let fw_query = Message::new(
@@ -1494,8 +1497,9 @@ impl Node  {
                 let record = record_reader.get(&key);
                 match record {
                     Some(exist) => {
-                        if exist.pending == false {
+                        if exist.pending == true {
                             self.records.write().await.remove(&key);
+
                         } else {
                             self.print_debug_msg("Error: 'logical' delete must occur first");
                             return;
@@ -1508,6 +1512,16 @@ impl Node  {
                             );
                             
                             self.send_msg(self.get_prev().await, &ack_del).await;
+                        }
+                        else if exist.replica_idx == 0  {
+                            // notify waiting readers on this key
+                            let mut waiting_list = self.pendings.write().await;
+
+                            if let Some(notify) = waiting_list.get(&key) {
+                                notify.notify_waiters();  
+                                // remove this from queue
+                                waiting_list.remove(&key);
+                            }
                         }
                     }
                     _ => self.print_debug_msg("Wrong delete ack received"),
