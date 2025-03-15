@@ -16,7 +16,7 @@ fn send_request(ip: Ipv4Addr, port: u16, request_msg: &Message) -> Result<String
     let request = serde_json::json!(request_msg).to_string();
     let address = format!("{}:{}", ip, port);
     let response_ip = get_local_ip();
-    let response_port = port + 42;
+    let response_port = port + (process::id() % 1000) as u16;
     println!("Sending request to {}: {}", address, request);
     let response_address = format!("{}:{}", response_ip, response_port);
 
@@ -92,13 +92,31 @@ pub fn run_cli() {
         "insert" => {
             if args.len() < 6 {
                 println!("Usage:");
-                println!("cargo run cli <ip> <port> insert <key> <value>");
+                println!("cargo run cli <ip> <port> insert [<key> <value> | -f <file>]");
                 process::exit(1);
+            }
+
+            if args[5] == "-f" {
+                let filename = args[6].as_str();
+                let file_content = std::fs::read_to_string(filename).expect("Failed to read file");
+                let lines: Vec<&str> = file_content.lines().collect();
+                for line in lines {
+                    let request = Message::new(
+                        MsgType::Insert,
+                        Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
+                        &MsgData::Insert { key: line.trim().to_string(), value: line.trim().to_string() }
+                    );
+                    match send_request(node_ip, node_port, &request) {
+                        Ok(response) => println!("{}", response),
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                }
+                return;
             }
 
             let request = Message::new(
                 MsgType::Insert,
-                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                 &MsgData::Insert { key: args[5].to_string(), value: args[6].to_string() }
             );
         
@@ -115,7 +133,7 @@ pub fn run_cli() {
             }
             let request = Message::new(
                 MsgType::Delete,
-                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                 &MsgData::Delete { key: args[5].to_string() }
             );
             match send_request(node_ip, node_port, &request) {
@@ -133,13 +151,30 @@ pub fn run_cli() {
             if args[5].as_str() == "*" {
                 request = Message::new(
                     MsgType::QueryAll,
-                    Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                    Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                     &MsgData::QueryAll {  }
                 );
-            } else {
+            } else if args[5].as_str() == "-f" { 
+                let filename = args[6].as_str();
+                let file_content = std::fs::read_to_string(filename).expect("Failed to read file");
+                let lines: Vec<&str> = file_content.lines().collect();
+                for line in lines {
+                    let request = Message::new(
+                        MsgType:::Query,
+                        Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
+                        &MsgData::Query { key: line.trim().to_string() }
+                    );
+                    match send_request(node_ip, node_port, &request) {
+                        Ok(response) => println!("{}", response),
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                }
+                return;
+            } 
+            else {
                 request = Message::new(
                     MsgType::Query,
-                    Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                    Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                     &MsgData::Query{key: args[5].to_string() }
                 );
             }
@@ -151,7 +186,7 @@ pub fn run_cli() {
         "overlay" => {
             let request = Message::new(
                 MsgType::Overlay,
-                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                 &MsgData::Overlay {  }
             );
             
@@ -165,7 +200,7 @@ pub fn run_cli() {
         "depart" => {
             let request = Message::new(
                 MsgType::Quit,
-                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                 &MsgData::Quit { id: format!("") } // TODO! 
             );
             
@@ -179,7 +214,7 @@ pub fn run_cli() {
         "join" => {
             let request = Message::new(
                 MsgType::Join,
-                Some(&NodeInfo::new(get_local_ip(), node_port + 42)),
+                Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                 &MsgData::Join { id: format!("") }   // TODO!
             );
             

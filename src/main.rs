@@ -45,7 +45,7 @@ fn main() {
                     Ok(val) => val,
                     Err(_) => panic!("Invalid parameter for replication factor: k\n")
                 };
-                if (k < 1) { panic!("Invalid k. Must be > 0.\n"); }
+                if k < 1 { panic!("Invalid k. Must be > 0.\n"); }
                 let m_code: usize = match args[3].parse() {
                     Ok(val) => val,
                     Err(_) => panic!("Invalid parameter for replication mode: m\n 

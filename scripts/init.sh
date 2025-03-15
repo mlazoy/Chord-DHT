@@ -23,18 +23,22 @@ echo "Using parameters: k=$k, m=$m"
 for i in $(seq 1 $VM_COUNT); do
   if [ $i -eq $BOOTSTRAP_NODE ]; then
     # If it's the bootstrap node, run the bootstrap command and a regular node on VM$i
-    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && cargo run --release bootstrap $k $m" & 
+    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && \
+        CARGO_TARGET_DIR=/home/ubuntu/Chord-DHT/target_bootstrap cargo run --release bootstrap $k $m"
     echo "Starting bootstrap node on VM$i"
     
     # Run second node on the same VM with a different port
-    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && cargo run --release node 1" &
+    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && \
+        CARGO_TARGET_DIR=/home/ubuntu/Chord-DHT/target_vm${i}_node1 cargo run --release node 1"
     echo "Starting second node on VM$i"
   else
     # For regular nodes, run two nodes with different ports (e.g., 8001 and 8002)
-    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && cargo run --release node 1" &
+    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && \
+        CARGO_TARGET_DIR=/home/ubuntu/Chord-DHT/target_vm${i}_node1 cargo run --release node 1"
     echo "Starting first node on VM$i"
 
-    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && cargo run --release node 2" &
+    ssh team_17-vm$i "source /home/ubuntu/.cargo/env && cd /home/ubuntu/Chord-DHT && \
+        CARGO_TARGET_DIR=/home/ubuntu/Chord-DHT/target_vm${i}_node2 cargo run --release node 2"
     echo "Starting second node on VM$i"
   fi
 done
