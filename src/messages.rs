@@ -50,7 +50,7 @@ pub enum MsgData {
     FwDelete { key: HashType, forward_back:bool },
     AckDelete { key: HashType },
     Query { key: String },
-    FwQuery {key : HashType, forward_tail: bool },
+    FwQuery {key : HashType },
     QueryAll { },
     FwQueryAll { record_list: Vec<Item>, header: HashType },
     Overlay { },
