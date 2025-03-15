@@ -1019,7 +1019,6 @@ impl Node  {
                         followed by a read at the "tail" results in non-linear behaviour. 
                         To avoid this, reads are blocked until 'pending' field becomes false.
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
-
                         if self.is_responsible(&key_hash).await {
                             loop {
                                 let record_reader = self.records.read().await;
@@ -1081,7 +1080,7 @@ impl Node  {
                             let fw_query = Message::new(
                                 MsgType::FwQuery,
                                 client,
-                                &MsgData::FwQuery { key:key_hash, forward_tail:false }
+                                &MsgData::Query { key: key.clone() }
                             ); 
 
                             if self.maybe_next_responsible(&key_hash).await {
@@ -1168,18 +1167,7 @@ impl Node  {
                             }
                         }
                         else {
-                            // continue forwarding in the primary direction
-                            let fw_query = Message::new(
-                                MsgType::FwQuery,
-                                client,
-                                &MsgData::FwQuery { key: *key, forward_tail: false }
-                            );
-
-                            if self.maybe_next_responsible(key).await {
-                                self.send_msg(self.get_succ().await, &fw_query).await;
-                            } else {
-                                self.send_msg(self.get_prev().await, &fw_query).await;
-                            }
+                            self.print_debug_msg("Query must reach head.\n");
                         }
                     }
 
