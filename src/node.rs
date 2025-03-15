@@ -894,16 +894,18 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
+                        let k = self.get_current_k().await;
+
                         let new_item = Item{
                             title: key.clone(),
                             value: value.clone(),
                             replica_idx: *replica as u8, 
-                            pending: true
+                            pending: k > 0
                         };
                         // no need to keep pending lists on intermediate nodes
                         self.insert_aux(key_hash, &new_item).await;
 
-                        if (*replica as u8) < self.get_current_k().await {
+                        if (*replica as u8) < k {
                             let fw_msg = Message::new(
                                 MsgType::FwInsert,
                                 client,
@@ -913,7 +915,7 @@ impl Node  {
 
                             self.send_msg(succ, &fw_msg).await;
                         } 
-                        else if (*replica as u8) == self.get_current_k().await {
+                        else if (*replica as u8) == k {
                             /* If reached tail reply to client and send an ack to previous node */
                             let user_msg = Message::new(
                                 MsgType::Reply,
@@ -923,13 +925,15 @@ impl Node  {
                             
                             client.unwrap().send_msg(&user_msg).await;
 
-                            let ack_msg = Message::new(
-                                MsgType::AckInsert,
-                                None,
-                                &MsgData::AckInsert { key: key_hash }
-                            );
+                            if k > 0 {      // init acks only if tail != head
+                                let ack_msg = Message::new(
+                                    MsgType::AckInsert,
+                                    None,
+                                    &MsgData::AckInsert { key: key_hash }
+                                );
 
-                            self.send_msg(prev, &ack_msg).await;
+                                self.send_msg(prev, &ack_msg).await;
+                            }
                         }
                     }
 
