@@ -17,11 +17,12 @@ mod messages;
 //const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);  //localhost 
 const BOOT_ADDR: Ipv4Addr = Ipv4Addr::new(10,0,24,44);  
 const API_PORT: u16 = 8000; 
-const NUM_THREADS: usize = 4;
+const NUM_THREADS: usize = 8;
 
 // for testing locally only
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Entering Chord-DHT Network...");
 
     let args: Vec<String> = env::args().collect();
@@ -65,7 +66,7 @@ fn main() {
                     Some(m),
                     None            // denotes ptr to itself
                 );
-                boot_node.init();
+                boot_node.init().await;
             }
 
         }
@@ -86,7 +87,7 @@ fn main() {
                     Some(bootstrap_info));
             
 
-                node_instance.init();
+                node_instance.init().await;
             }
         }
 

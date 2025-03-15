@@ -160,7 +160,7 @@ pub fn run_cli() {
                 let lines: Vec<&str> = file_content.lines().collect();
                 for line in lines {
                     let request = Message::new(
-                        MsgType:::Query,
+                        MsgType::Query,
                         Some(&NodeInfo::new(get_local_ip(), node_port + (process::id() % 1000) as u16)),
                         &MsgData::Query { key: line.trim().to_string() }
                     );

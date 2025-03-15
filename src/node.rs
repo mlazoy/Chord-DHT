@@ -1,15 +1,18 @@
 #![allow(dead_code, non_snake_case, unused_imports)]
 
-use std::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use std::net::{Ipv4Addr,SocketAddrV4};
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock;
+use std::sync::Arc;
 use num_traits::Bounded;
 use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::io::{Read,Write, BufReader};
+// use std::io::{Read,Write, BufReader};
 use serde_json::Value;
 use std::{thread, vec};
+use async_trait::async_trait;
+use tokio::io::{AsyncReadExt,BufReader,AsyncWriteExt};
 use std::fmt;
 
 use crate::messages::{Message, MsgType, MsgData};
@@ -67,14 +70,14 @@ impl NodeInfo {
         self.port
     }
 
-    pub fn send_msg(&self, msg: &Message) -> Option<TcpStream> { 
+    async fn send_msg(&self, msg: &Message) -> Option<TcpStream> { 
         let sock_addr = std::net::SocketAddrV4::new(self.ip_addr, self.port);
         let jsonify = serde_json::json!(msg).to_string();
         let msg_bytes = jsonify.as_bytes();
         
-        match TcpStream::connect(sock_addr) {
+        match TcpStream::connect(sock_addr).await {
             Ok(mut stream) => {
-                if let Err(e) = stream.write_all(msg_bytes) {
+                if let Err(e) = stream.write_all(msg_bytes).await {
                     eprintln!(
                         "❌ Message {:?} failed to deliver to {}:{} - {}",
                         msg,
@@ -170,46 +173,46 @@ impl Node  {
         self.status.store(new_status, Ordering::Relaxed);
     }
 
-    fn get_prev(&self) -> Option<NodeInfo> {
-        *self.previous.read().unwrap()
+    async fn get_prev(&self) -> Option<NodeInfo> {
+        *self.previous.read().await
     }
 
-    fn get_succ(&self) -> Option<NodeInfo> {
-        *self.successor.read().unwrap()
+    async fn get_succ(&self) -> Option<NodeInfo> {
+        *self.successor.read().await
     }
 
-    fn set_prev(&self, new_node:Option<NodeInfo>) {
-        *self.previous.write().unwrap() = new_node;
+    async fn set_prev(&self, new_node:Option<NodeInfo>) {
+        *self.previous.write().await = new_node;
     }
 
-    fn set_succ(&self, new_node:Option<NodeInfo>) {
-        *self.successor.write().unwrap() = new_node;
+    async fn set_succ(&self, new_node:Option<NodeInfo>) {
+        *self.successor.write().await = new_node;
     }
 
     fn get_info(&self) -> NodeInfo {
         self.info
     }
 
-    fn get_replica_ranges(&self) -> UnionRange<HashType> {
-        self.replication.read().unwrap().replica_ranges.clone()
+    async fn get_replica_ranges(&self) -> UnionRange<HashType> {
+        self.replication.read().await.replica_ranges.clone()
     }
 
-    fn get_consistency(&self) -> Consistency {
-        self.replication.read().unwrap().replication_mode
+    async fn get_consistency(&self) -> Consistency {
+        self.replication.read().await.replication_mode
     }
 
-    fn max_replication(&self) -> u8 {
-        self.replication.read().unwrap().replication_factor
+    async fn max_replication(&self) -> u8 {
+        self.replication.read().await.replication_factor
     }
 
     // dynamically adjusts replication factor when online nodes are less than k
-    fn get_current_k(&self) -> u8 {
-        let k = self.replication.read().unwrap().replication_factor;
-        std::cmp::min(self.get_replica_ranges().get_size() as u8 , k) 
+    async fn get_current_k(&self) -> u8 {
+        let k = self.replication.read().await.replication_factor;
+        std::cmp::min(self.get_replica_ranges().await.get_size() as u8 , k) 
     }
 
-    fn insert_aux(&self, key: HashType, new_record: &Item) {
-        let mut record_writer = self.records.write().unwrap();
+    async fn insert_aux(&self, key: HashType, new_record: &Item) {
+        let mut record_writer = self.records.write().await;
         // check if an id already exists and if so merge item data
         if let Some(exist) = record_writer.get_mut(&key) { 
             // Concatenate value 
@@ -221,19 +224,19 @@ impl Node  {
         }
     }
 
-    fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &Message) -> Option<TcpStream> {
+    async fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &Message) -> Option<TcpStream> {
         if let Some(dest) = dest_node {
-            dest.send_msg(&msg)
+            dest.send_msg(&msg).await
         } else {
             eprintln!("Failed to send message: destination node not found");
             None
         }
     }
 
-    fn is_responsible(&self, key: &HashType) -> bool {
+    async fn is_responsible(&self, key: &HashType) -> bool {
         // get read locks first 
-        let prev_rd = self.get_prev();
-        let succ_rd = self.get_succ();
+        let prev_rd = self.get_prev().await;
+        let succ_rd = self.get_succ().await;
         if prev_rd.is_none() || succ_rd.is_none() {
             return true;
         }
@@ -250,18 +253,18 @@ impl Node  {
 
 
     // returns -1 if not a replica manager, otherwise the replica_idx of key in this node
-    fn is_replica_manager(&self, key:&HashType) -> i16 {
-        if self.is_responsible(key) { return 0; }
-        let replica_reader = self.get_replica_ranges();
+    async fn is_replica_manager(&self, key:&HashType) -> i16 {
+        if self.is_responsible(key).await { return 0; }
+        let replica_reader = self.get_replica_ranges().await;
         return replica_reader.is_subset(*key);
     }
 
     /* used to check whether a key should be passed to successor or predecessor node
         taking into account wrapping around on last node 
         to avoid traversing the whole ring backwards */
-    fn maybe_next_responsible(&self, key: &HashType) -> bool {
+    async fn maybe_next_responsible(&self, key: &HashType) -> bool {
         let succ_rd = self.get_succ();
-        let succ_id = succ_rd.unwrap().id;
+        let succ_id = succ_rd.await.unwrap().id;
         if self.get_id() < succ_id {
             // Normal case: key falls within (self, any forward successor]
             *key > self.get_id() 
@@ -271,15 +274,15 @@ impl Node  {
         }
     }
 
-    fn relocate_replicas(&self) {
-        let k = self.get_current_k();
-        let mut records_writer = self.records.write().unwrap();
+    async fn relocate_replicas(&self) {
+        let k = self.get_current_k().await;
+        let mut records_writer = self.records.write().await;
         let mut to_remove: Vec<HashType> = Vec::new();
         for (key, item) in records_writer.iter_mut(){
             if item.replica_idx == k {
                 to_remove.push(*key);
             } else if (item.replica_idx > 0 && item.replica_idx < k) || 
-                      (item.replica_idx == 0 && !self.is_responsible(key)) {
+                      (item.replica_idx == 0 && !self.is_responsible(key).await) {
                 item.replica_idx += 1;
             } 
         }
@@ -289,13 +292,13 @@ impl Node  {
         }
     }
 
-    pub fn init(&self) { 
+    pub async fn init(&self) { 
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
-        match TcpListener::bind(sock_addr) {
+        match TcpListener::bind(sock_addr).await {
             Ok(listener) => {
                 if self.bootstrap.is_none() {
-                    self.set_prev(Some(self.get_info()));
-                    self.set_succ(Some(self.get_info()));
+                    self.set_prev(Some(self.get_info())).await;
+                    self.set_succ(Some(self.get_info())).await;
                 }
                 let node_server = Server::new(self.clone());
                 self.set_status(true);
@@ -303,13 +306,14 @@ impl Node  {
                     Some(_) => self.print_debug_msg(&format!("Node with id: {} is listening on {}", self.get_id(), sock_addr)),
                     _ => self.print_debug_msg(&format!("Bootstrap has id:{} and is listening on {}", self.get_id(), sock_addr))
                 }
-                node_server.wait_for_requests(listener, NUM_THREADS); 
+                //node_server.wait_for_requests(listener, NUM_THREADS);
+                node_server.wait_for_requests(listener).await; 
             }
             Err(e) => panic!("Failed to bind to {}: {}", sock_addr, e)    
         }
     }
 
-    pub fn join_ring(&self, client:Option<&NodeInfo>) {
+    pub async fn join_ring(&self, client:Option<&NodeInfo>) {
         // forward the Join Request to bootsrap
         self.print_debug_msg("Preparing 'Join' Request...");
         if let Some(bootstrap_node) = self.bootstrap {
@@ -318,7 +322,7 @@ impl Node  {
                 client,
                 &MsgData::FwJoin { new_node: self.get_info() } 
             );
-            bootstrap_node.send_msg(&join_msg);
+            bootstrap_node.send_msg(&join_msg).await;
         } 
         else {
             // bootstrap node just changes its status
@@ -330,11 +334,11 @@ impl Node  {
                 &MsgData::Reply { reply: format!("Bootstrap node joined the ring successfully!") }
             );
 
-            client.unwrap().send_msg(&user_msg);
+            client.unwrap().send_msg(&user_msg).await;
         } 
     }
 
-    fn handle_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwJoin { new_node } => {
                 self.print_debug_msg(&format!("Handling Join Request - {} ", new_node));
@@ -347,23 +351,23 @@ impl Node  {
                         None,
                         &MsgData::Reply{ reply: format!("Node {} is already part of the network", new_node)}
                     );
-                    client.unwrap().send_msg(&user_msg);
+                    client.unwrap().send_msg(&user_msg).await;
                     return;
                 } 
                 // get a read lock on neighbors and k
-                let prev_rd = self.get_prev();
-                let succ_rd = self.get_succ();
-                let max_k = self.max_replication();
+                let prev_rd = self.get_prev().await;
+                let succ_rd = self.get_succ().await;
+                let max_k = self.max_replication().await;
                 // create the new node
                 let new_node = Some(NodeInfo::new(peer_ip, peer_port));
                 
-                self.print_debug_msg(&format!("My ranges: {:?}", self.get_replica_ranges()));
+                //self.print_debug_msg(&format!("My ranges: {:?}", self.get_replica_ranges()));
 
-                if self.is_responsible(&id) { 
+                if self.is_responsible(&id).await { 
                     self.print_debug_msg(&format!("Preparing 'AckJoin' for new node {}", new_node.unwrap()));
 
                     // define replica ranges for current and new node 
-                    let mut transferred_ranges = self.get_replica_ranges();
+                    let mut transferred_ranges = self.get_replica_ranges().await;
                     let mut wrap = false;
                     let new_range = Range::new(
                         prev_rd.unwrap().id,
@@ -372,7 +376,7 @@ impl Node  {
                         true); 
                     //Update current replica ranges 
                     {
-                        let mut replication_writer = self.replication.write().unwrap();
+                        let mut replication_writer = self.replication.write().await;
                         let my_replica_ranges = &mut replication_writer.replica_ranges;
                         my_replica_ranges.insert(new_range);   // add new node's key range
                         if my_replica_ranges.get_size() == (max_k + 1) as usize { 
@@ -391,25 +395,25 @@ impl Node  {
 
                     let replica_config = ReplicationConfig {
                         replication_factor : max_k,
-                        replication_mode : self.get_consistency(),
+                        replication_mode : self.get_consistency().await,
                         replica_ranges : transferred_ranges
                     };
 
                     // update always locally 
                     self.print_debug_msg(&format!("Updating previous locally to {}", new_node.unwrap()));
-                    self.set_prev(new_node);
+                    self.set_prev(new_node).await;
 
                     // find records to share with the new node according to new managers and previous
                     let mut vec_items: Vec<Item> = Vec::new();
                     {
-                        let records_read = self.records.read().unwrap();
+                        let records_read = self.records.read().await;
                         for (key, item) in records_read.iter() {
-                            if item.replica_idx > 0 || (item.replica_idx == 0 && !self.is_responsible(key)) {
+                            if item.replica_idx > 0 || (item.replica_idx == 0 && !self.is_responsible(key).await) {
                                 vec_items.push(item.clone());
                                 continue;
                             } 
                             // TODO! check this 
-                            if wrap && item.replica_idx == 0 && self.is_responsible(key) {
+                            if wrap && item.replica_idx == 0 && self.is_responsible(key).await {
                                 vec_items.push(Item {
                                     replica_idx: 1, // Increment only replica_idx
                                     ..item.clone() // Keep other fields unchanged
@@ -427,7 +431,7 @@ impl Node  {
                                                   new_items: vec_items, replica_config: replica_config}
                     );
 
-                    self.send_msg(new_node, &ack_msg);
+                    self.send_msg(new_node, &ack_msg).await;
 
                     // inform previous about the new node join
                     if !prev_rd.is_none() && self.get_id() != prev_rd.unwrap().id {
@@ -437,20 +441,20 @@ impl Node  {
                             None,
                             &MsgData::Update { prev_info: None, succ_info: new_node }
                         );
-                        self.send_msg(prev_rd, &prev_msg);
+                        self.send_msg(prev_rd, &prev_msg).await;
                     
 
                     } else {
                         self.print_debug_msg(&format!("Updating successor locally to {}", new_node.unwrap()));
-                        self.set_succ(new_node);
+                        self.set_succ(new_node).await;
                     }
 
 
                     // update my replica indices
-                    self.relocate_replicas();
+                    self.relocate_replicas().await;
 
                     // forward replica relocation to successors
-                    let k = self.get_current_k();
+                    let k = self.get_current_k().await;
 
                     if k > 1 && succ_rd.unwrap().id != self.get_id() {
                         let rel_msg = Message::new(
@@ -459,7 +463,7 @@ impl Node  {
                             &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: Some(new_range) }
                         );
 
-                        self.send_msg(succ_rd, &rel_msg);
+                        self.send_msg(succ_rd, &rel_msg).await;
                     }
 
                 }
@@ -471,7 +475,7 @@ impl Node  {
                         client,
                         &MsgData::FwJoin { new_node: new_node.unwrap() }
                     );
-                    self.send_msg(succ_rd, &fw_msg);
+                    self.send_msg(succ_rd, &fw_msg).await;
                 } 
 
             }
@@ -479,20 +483,20 @@ impl Node  {
         }
     }
 
-    fn handle_ack_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_ack_join(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::AckJoin { prev_info, succ_info, 
                                new_items, replica_config } => {
-                self.set_prev(*prev_info);
-                self.set_succ(*succ_info);
+                self.set_prev(*prev_info).await;
+                self.set_succ(*succ_info).await;
                 // insert new_items
                 for item in new_items.iter() {
                     let new_key = HashFunc(&item.title);
-                    self.insert_aux(new_key, item);
+                    self.insert_aux(new_key, item).await;
                 }
                 
                 {
-                    let mut replication_writer = self.replication.write().unwrap();
+                    let mut replication_writer = self.replication.write().await;
                     replication_writer.replication_factor = replica_config.replication_factor;
                     replication_writer.replication_mode = replica_config.replication_mode;
                     // get replica managers assert vector is empty in this point
@@ -510,22 +514,22 @@ impl Node  {
                     None,
                     &MsgData::Reply { reply: format!("New node {} joined the ring sucessfully!", self.get_id()) }
                 );
-                client.unwrap().send_msg(&user_msg);
+                client.unwrap().send_msg(&user_msg).await;
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
     }
 
-    fn handle_update(&self, data:&MsgData) {
+    async fn handle_update(&self, data:&MsgData) {
         match data {
             MsgData::Update { prev_info, succ_info} => {
                 if !prev_info.is_none() {
-                    self.set_prev(*prev_info);
+                    self.set_prev(*prev_info).await;
                     self.print_debug_msg(&format!("Updated 'previous' to {}", prev_info.unwrap()));
                 }
 
                 if !succ_info.is_none() {
-                    self.set_succ(*succ_info);
+                    self.set_succ(*succ_info).await;
                     self.print_debug_msg(&format!("Updated 'successor' to {}", succ_info.unwrap()));
                 }
             }
@@ -533,15 +537,15 @@ impl Node  {
         }
     }
 
-    fn handle_relocate(&self, data:&MsgData) {
+    async fn handle_relocate(&self, data:&MsgData) {
         match data {
             MsgData::Relocate { k_remaining, inc, new_copies, range} => {
-                let k = self.get_current_k();
-                let max_k = self.max_replication();
+                let k = self.get_current_k().await;
+                let max_k = self.max_replication().await;
 
                 if *inc { // case 'join'
                     {
-                        let mut records_writer = self.records.write().unwrap();
+                        let mut records_writer = self.records.write().await;
                         let mut to_remove: Vec<HashType> = Vec::new();
                         for (key, item) in records_writer.iter_mut(){
                             if item.replica_idx == k {
@@ -557,7 +561,7 @@ impl Node  {
 
                     // update ranges 
                     if let Some(split) = range {
-                        let mut replication_writer = self.replication.write().unwrap();
+                        let mut replication_writer = self.replication.write().await;
                         let ranges = &mut replication_writer.replica_ranges;
 
                         ranges.split_range(split.get_bounds().1);
@@ -575,13 +579,13 @@ impl Node  {
                             &MsgData::Relocate { k_remaining: *k_remaining-1, inc: true, new_copies: None, range: *range }
                         );
 
-                        self.send_msg(self.get_succ(), &rel_msg);
+                        self.send_msg(self.get_succ().await, &rel_msg).await;
                     }
                 } 
                 else { // case 'depart'
                 let mut to_transfer: Vec<Item> = Vec::new();
                 {
-                    let mut records_writer = self.records.write().unwrap();
+                    let mut records_writer = self.records.write().await;
                     for (_key, item) in records_writer.iter_mut(){
                         if item.replica_idx == k {
                             to_transfer.push(item.clone());
@@ -591,13 +595,13 @@ impl Node  {
                         } 
                     }
                 } // release write locks here
-                    let ranges_tmp = self.get_replica_ranges();
+                    let ranges_tmp = self.get_replica_ranges().await;
                     let mut range_to_transfer = ranges_tmp.get_head();
                     if ranges_tmp.get_size() == 1 {
-                        range_to_transfer.set_upper(self.get_succ().unwrap().id);
+                        range_to_transfer.set_upper(self.get_succ().await.unwrap().id);
                     }
                     if let Some(range) = range {
-                        let mut replica_writer = self.replication.write().unwrap();
+                        let mut replica_writer = self.replication.write().await;
                         let ranges = &mut replica_writer.replica_ranges;
                         ranges.merge_at(*k_remaining as usize);
                         ranges.insert_head(range.clone());
@@ -607,8 +611,8 @@ impl Node  {
                     if let Some(copies) = new_copies { 
                         for copy in copies.iter(){
                             let key_copy = HashFunc(&copy.title);
-                            if self.records.read().unwrap().get(&key_copy).is_none() {
-                                self.insert_aux(key_copy, &copy);
+                            if self.records.read().await.get(&key_copy).is_none() {
+                                self.insert_aux(key_copy, &copy).await;
                             }
                         }
                     }
@@ -621,7 +625,7 @@ impl Node  {
                             &MsgData::Relocate { k_remaining: *k_remaining-1, inc: false, new_copies: Some(to_transfer), range: Some(range_to_transfer) }
                         );
 
-                        self.send_msg(self.get_succ(), &rel_msg);
+                        self.send_msg(self.get_succ().await, &rel_msg).await;
                         return;
                     } 
                 }
@@ -632,11 +636,11 @@ impl Node  {
         }
     }
 
-    pub fn handle_quit(&self, client:Option<&NodeInfo>, _data:&MsgData) {
+    async fn handle_quit(&self, client:Option<&NodeInfo>, _data:&MsgData) {
         self.print_debug_msg("Preparing to Quit...");
         // grab read locks here 
-        let prev = self.get_prev();
-        let succ = self.get_succ();
+        let prev = self.get_prev().await;
+        let succ = self.get_succ().await;
 
         if self.bootstrap.is_none() {
             let reply:&str;
@@ -652,7 +656,7 @@ impl Node  {
                 None,
                 &MsgData::Reply { reply: reply.to_string() }
             );
-            client.unwrap().send_msg(&user_msg);
+            client.unwrap().send_msg(&user_msg).await;
             return;
         }
         /* construct an Update Message for previous
@@ -664,7 +668,7 @@ impl Node  {
                     None,
                     &MsgData::Update { prev_info: None, succ_info: succ } 
                 );
-                prev_node.send_msg(&quit_msg_prev);
+                prev_node.send_msg(&quit_msg_prev).await;
                 self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", prev_node));
             }
         }
@@ -677,14 +681,14 @@ impl Node  {
                     None,
                     &MsgData::Update { prev_info: prev, succ_info: None }
                 );
-                succ_node.send_msg(&quit_msg_succ);
+                succ_node.send_msg(&quit_msg_succ).await;
                 self.print_debug_msg(&format!("Sent Quit Message to {} succesfully ", succ_node));
             }
 
             // gather last repicas
             let mut last_replicas = Vec::new();
-            let k = self.get_current_k();
-            let record_reader = self.records.read().unwrap();
+            let k = self.get_current_k().await;
+            let record_reader = self.records.read().await;
             for (_key, item) in record_reader.iter(){
                 if item.replica_idx == k {
                     last_replicas.push(item.clone());
@@ -692,28 +696,30 @@ impl Node  {
             }
             
             // TODO! Test this
-            let ranges = self.get_replica_ranges();
+            let succ = self.get_succ().await;
+            let ranges = self.get_replica_ranges().await;
             let mut range = ranges.get_head();
             if ranges.get_size() == 1 {
-                range.set_upper(self.get_succ().unwrap().id);
+                range.set_upper(succ.unwrap().id);
             }
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
                 &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas), range: Some(range) }
             );
-            if self.get_succ().unwrap().id != self.get_id() {
-                self.send_msg(self.get_succ(), &rel_msg);
+            
+            if succ.unwrap().id != self.get_id() {
+                self.send_msg(succ, &rel_msg).await;
             }
         }
         // delete all records 
-        if let Ok(mut map) = self.records.write() {
-            map.clear();
-        }
+        let mut map = self.records.write().await;
+        map.clear();
+        
 
-        if let Ok(mut replica) = self.replication.write() {
-            replica.replica_ranges.clear();
-        }
+        let mut replica = self.replication.write().await;
+        replica.replica_ranges.clear();
+        
         // change status and inform user
         self.set_status(false);
         let user_msg = Message::new(
@@ -721,33 +727,36 @@ impl Node  {
             None,
             &MsgData::Reply { reply: format!("Node {} has left the network", self) }
         );
-        client.unwrap().send_msg(&user_msg);
+        client.unwrap().send_msg(&user_msg).await;
 
     }
 
-    fn handle_insert(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_insert(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::Insert { key, value } => {
                 let key_hash = HashFunc(key);
-                match self.get_consistency() {
+                let prev = self.get_prev().await;
+                let succ = self.get_succ().await;
+                let cons = self.get_consistency().await;
+                match cons {
                     Consistency::Eventual => {
                         /* every replica manager can save the new item loally 
                             and reply to client immediately. */
-                        let replica= self.is_replica_manager(&key_hash);
+                        let replica= self.is_replica_manager(&key_hash).await;
                         if replica >= 0 {
                             let new_item = Item{ 
                                 title:key.clone(), 
                                 value:value.clone(), 
                                 replica_idx:replica as u8, 
                                 pending:false };
-                            self.insert_aux(key_hash, &new_item);
+                            self.insert_aux(key_hash, &new_item).await;
 
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
                                 &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", key, value) }
                             );
-                            client.unwrap().send_msg(&user_msg);
+                            client.unwrap().send_msg(&user_msg).await;
 
                             // propagate insert to other replica managers
                             if replica > 0 {
@@ -759,10 +768,10 @@ impl Node  {
                                                                replica:(replica - 1), forward_back:true }
                                 );
 
-                                self.send_msg(self.get_prev(), &fw_back);
+                                self.send_msg(prev, &fw_back).await;
                             }
 
-                            if (replica as u8) < self.get_current_k() {
+                            if (replica as u8) < self.get_current_k().await {
                                 // successor's replica_idx += 1
                                 let fw_next = Message::new(
                                     MsgType::FwInsert,
@@ -771,7 +780,7 @@ impl Node  {
                                                                replica: (replica + 1), forward_back:false }
                                 );
 
-                                self.send_msg(self.get_prev(), &fw_next);
+                                self.send_msg(prev, &fw_next).await;
                             }
                         } else {
                             // forward same message to another node in the primary direction 
@@ -780,10 +789,10 @@ impl Node  {
                                 client,
                                 &MsgData::Insert { key: key.clone(), value: value.clone() }
                             );
-                            if self.maybe_next_responsible(&key_hash) {
-                                self.send_msg(self.get_succ(), &fw_ins);
+                            if self.maybe_next_responsible(&key_hash).await {
+                                self.send_msg(succ, &fw_ins).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_ins);
+                                self.send_msg(prev, &fw_ins).await;
                             }
                         }
                     }
@@ -792,23 +801,23 @@ impl Node  {
                         /* Only the primary node can perform the first insertion.
                            It forwards the insert request to all other replica managers without replying to client.
                            Meanwhile the 'pending' field remains true until an ack is received. */
-                        if self.is_responsible(&key_hash) {
+                        if self.is_responsible(&key_hash).await {
                             let new_item = Item{
                                 title: key.clone(),
                                 value: value.clone(),
                                 replica_idx: 0,
                                 pending:true
                             };
-                            self.insert_aux(key_hash, &new_item);
+                            self.insert_aux(key_hash, &new_item).await;
 
-                            if self.get_current_k() > 0 {
+                            if self.get_current_k().await > 0 {
                                 let fw_ins = Message::new(
                                     MsgType::FwInsert,
                                     client,
                                     &MsgData::FwInsert { key: key.clone(), value: value.clone(), 
                                                                 replica: 1, forward_back: false }
                                 );
-                                self.send_msg(self.get_succ(), &fw_ins);
+                                self.send_msg(succ, &fw_ins).await;
                             }
                         } else {
                             let fw_ins = Message::new(
@@ -817,15 +826,15 @@ impl Node  {
                                 &MsgData::Insert { key: key.clone(), value: value.clone() }
                             );
 
-                            if self.maybe_next_responsible(&key_hash) {
-                                self.send_msg(self.get_succ(), &fw_ins);
+                            if self.maybe_next_responsible(&key_hash).await {
+                                self.send_msg(succ, &fw_ins).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_ins);
+                                self.send_msg(prev, &fw_ins).await;
                             }
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
             }
 
@@ -833,19 +842,22 @@ impl Node  {
         } 
     }
 
-    fn handle_fw_insert(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_fw_insert(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwInsert { key, value, replica, forward_back } => {
                 // forward_back is used to avoid ping-pong messages
                 let key_hash = HashFunc(key);
-                match self.get_consistency() {
+                let prev = self.get_prev().await;
+                let succ = self.get_succ().await;
+                let cons = self.get_consistency().await;
+                match cons {
                     Consistency::Eventual => {
                         if *replica >= 0 {
                             self.insert_aux(key_hash, &Item { 
                                 title: key.clone(), 
                                 value: value.clone(), 
                                 replica_idx: *replica as u8, 
-                                pending: false });
+                                pending: false }).await;
 
                             if *replica > 0 && *forward_back == true {
                                 let fw_ins = Message::new(
@@ -854,18 +866,18 @@ impl Node  {
                                     &MsgData::FwInsert { key: key.clone(), value: value.clone(), 
                                                                replica: (replica - 1), forward_back: true }
                                 );
-                                self.send_msg(self.get_prev(), &fw_ins);
+                                self.send_msg(prev, &fw_ins).await;
                                 return;
                             }
 
-                            if (*replica as u8) < self.get_current_k() && *forward_back == false {
+                            if (*replica as u8) < self.get_current_k().await && *forward_back == false {
                                 let fw_ins = Message::new(
                                     MsgType::FwInsert,
                                     None,
                                     &MsgData::FwInsert { key: key.clone(), value: value.clone(), 
                                                                replica: (replica + 1), forward_back: false }
                                 );
-                                self.send_msg(self.get_succ(), &fw_ins);
+                                self.send_msg(succ, &fw_ins).await;
                                 return;
                             }
 
@@ -881,9 +893,9 @@ impl Node  {
                             replica_idx: *replica as u8, 
                             pending: true
                         };
-                        self.insert_aux(key_hash, &new_item);
+                        self.insert_aux(key_hash, &new_item).await;
 
-                        if (*replica as u8) < self.get_current_k() {
+                        if (*replica as u8) < self.get_current_k().await {
                             let fw_msg = Message::new(
                                 MsgType::FwInsert,
                                 client,
@@ -891,9 +903,9 @@ impl Node  {
                                                           replica: *replica + 1, forward_back: false }
                             );
 
-                            self.send_msg(self.get_succ(), &fw_msg);
+                            self.send_msg(succ, &fw_msg).await;
                         } 
-                        else if (*replica as u8) == self.get_current_k() {
+                        else if (*replica as u8) == self.get_current_k().await {
                             /* If reached tail reply to client and send an ack to previous node */
                             let user_msg = Message::new(
                                 MsgType::Reply,
@@ -901,7 +913,7 @@ impl Node  {
                                 &MsgData::Reply {reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", new_item.title, new_item.value)}
                             );
                             
-                            client.unwrap().send_msg(&user_msg);
+                            client.unwrap().send_msg(&user_msg).await;
 
                             let ack_msg = Message::new(
                                 MsgType::AckInsert,
@@ -909,11 +921,11 @@ impl Node  {
                                 &MsgData::AckInsert { key: key_hash }
                             );
 
-                            self.send_msg(self.get_prev(), &ack_msg);
+                            self.send_msg(prev, &ack_msg).await;
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
 
             }
@@ -922,12 +934,12 @@ impl Node  {
     }
 
 
-    fn handle_ack_insert(&self, data:&MsgData) {
+    async fn handle_ack_insert(&self, data:&MsgData) {
         /* used for linearizability only
             change 'pending' to false and inform previous */
             match data {
                 MsgData::AckInsert { key } => {
-                    let mut record_writer = self.records.write().unwrap();
+                    let mut record_writer = self.records.write().await;
                     if let Some(record) = record_writer.get_mut(&key) {
                         record.pending = false;
 
@@ -938,7 +950,7 @@ impl Node  {
                                 &MsgData::AckInsert { key: *key }
                             );
 
-                            self.send_msg(self.get_prev(), &fw_ack);
+                            self.send_msg(self.get_prev().await, &fw_ack).await;
                         }
                     }
                 }
@@ -946,15 +958,18 @@ impl Node  {
             }
     }
 
-    fn handle_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::Query { key } => {
                 let key_hash = HashFunc(key);
-                match self.get_consistency() {
+                let cons = self.get_consistency().await;
+                let prev = self.get_prev().await;
+                let succ = self.get_succ().await;
+                match cons {
                     Consistency::Eventual => {
                         // whoever has a replica can reply
-                        if self.is_replica_manager(&key_hash) >= 0 {
-                            let records_reader = self.records.read().unwrap();
+                        if self.is_replica_manager(&key_hash).await >= 0 {
+                            let records_reader = self.records.read().await;
                             let res = records_reader.get(&key_hash);
                             let reply: &str = match res {
                                 Some(found) => &format!("Found data: (🔑 {} : 🔒{})", found.title, found.value),
@@ -967,7 +982,7 @@ impl Node  {
                                 &MsgData::Reply { reply: reply.to_string() }
                             );
                             // send to user
-                            client.unwrap().send_msg(&user_msg);
+                            client.unwrap().send_msg(&user_msg).await;
                             return;
                         } else {
                             // jsut forward Query to the direction of the primary node
@@ -976,10 +991,10 @@ impl Node  {
                                 client,
                                 &MsgData::FwQuery { key: key_hash, forward_tail: false }
                             );
-                            if self.maybe_next_responsible(&key_hash) {
-                                self.send_msg(self.get_succ(), &fw_query);
+                            if self.maybe_next_responsible(&key_hash).await {
+                                self.send_msg(succ, &fw_query).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_query);
+                                self.send_msg(prev, &fw_query).await;
                             }
                         }
                     }
@@ -990,10 +1005,10 @@ impl Node  {
                         To avoid this, reads are blocked until 'pending' field becomes false.
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
 
-                        if self.is_responsible(&key_hash) {
+                        if self.is_responsible(&key_hash).await {
                             // create a busy-waiting loop to periodaclly check pending
                             loop {  // TODO! Maybe better to use CondVar ...?
-                                let record_reader = self.records.read().unwrap();
+                                let record_reader = self.records.read().await;
                                 let record = record_reader.get(&key_hash);
                                 match record {
                                     Some(exist) => {
@@ -1004,13 +1019,13 @@ impl Node  {
                                             continue;
                                         } 
                                         else {
-                                            if exist.replica_idx < self.get_current_k() {
+                                            if exist.replica_idx < self.get_current_k().await {
                                                 let fw_msg = Message::new(
                                                     MsgType::FwQuery,
                                                     client,
                                                     &MsgData::FwQuery { key: key_hash, forward_tail: true }
                                                 );
-                                                self.send_msg(self.get_succ(), &fw_msg);
+                                                self.send_msg(succ, &fw_msg).await;
                                                 return;
                                             } 
                                             else {
@@ -1020,7 +1035,7 @@ impl Node  {
                                                     &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                                 );
 
-                                                client.unwrap().send_msg(&user_msg);
+                                                client.unwrap().send_msg(&user_msg).await;
                                                 return;
                                             }
                                         }
@@ -1033,7 +1048,7 @@ impl Node  {
                                             &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
                                         );
 
-                                        client.unwrap().send_msg(&user_msg);
+                                        client.unwrap().send_msg(&user_msg).await;
                                         return;
                                     }
                                 }
@@ -1046,15 +1061,15 @@ impl Node  {
                                 &MsgData::FwQuery { key:key_hash, forward_tail:false }
                             ); 
 
-                            if self.maybe_next_responsible(&key_hash) {
-                                self.send_msg(self.get_succ(), &fw_query);
+                            if self.maybe_next_responsible(&key_hash).await {
+                                self.send_msg(succ, &fw_query).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_query);
+                                self.send_msg(prev, &fw_query).await;
                             }
                         }
     
                     }
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
             }
 
@@ -1062,14 +1077,15 @@ impl Node  {
         }
     }
 
-    fn handle_fw_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_fw_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwQuery { key, forward_tail } => {
-                match self.get_consistency() {
+                let cons = self.get_consistency().await;
+                match cons {
                     Consistency::Eventual => {
                         // same as Query but hash is pre-computed
-                        if self.is_replica_manager(&key) >= 0 {
-                            let records_reader = self.records.read().unwrap();
+                        if self.is_replica_manager(&key).await >= 0 {
+                            let records_reader = self.records.read().await;
                             let res = records_reader.get(&key);
                             let reply: &str = match res {
                                 Some(found) => &format!("Found (🔑 {} : 🔒{})", found.title, found.value),
@@ -1082,7 +1098,7 @@ impl Node  {
                                 &MsgData::Reply { reply: reply.to_string() }
                             );
                             // send to user
-                            client.unwrap().send_msg(&user_msg);
+                            client.unwrap().send_msg(&user_msg).await;
                             return;
                         } else {
                             // jsut forward Query to the direction of the primary node
@@ -1091,30 +1107,30 @@ impl Node  {
                                 client,
                                 &MsgData::FwQuery { key: *key, forward_tail: false }
                             );
-                            if self.maybe_next_responsible(key) {
-                                self.send_msg(self.get_succ(), &fw_query);
+                            if self.maybe_next_responsible(key).await {
+                                self.send_msg(self.get_succ().await, &fw_query).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_query);
+                                self.send_msg(self.get_prev().await, &fw_query).await;
                             }
                         }
                     }
 
                     Consistency::Chain => {
                         if *forward_tail == true {
-                            let record_reader = self.records.read().unwrap();
+                            let record_reader = self.records.read().await;
                             let record = record_reader.get(key);
                             match record {
                                 Some(exist) => {
-                                    if exist.replica_idx < self.get_current_k() {
+                                    if exist.replica_idx < self.get_current_k().await {
                                         let fw_tail = Message::new(
                                             MsgType::FwQuery,
                                             client,
                                             &MsgData::FwQuery { key: *key, forward_tail: true }
                                         );
 
-                                        self.send_msg(self.get_succ(), &fw_tail);
+                                        self.send_msg(self.get_succ().await, &fw_tail).await;
                                     } 
-                                    else if exist.replica_idx == self.get_current_k() {
+                                    else if exist.replica_idx == self.get_current_k().await {
                                         // reached tail so can finally reply to client
                                         let user_msg = Message::new(
                                             MsgType::Reply,
@@ -1122,7 +1138,7 @@ impl Node  {
                                             &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                         );
 
-                                        client.unwrap().send_msg(&user_msg);
+                                        client.unwrap().send_msg(&user_msg).await;
                                     }
                                 }
                                 _ => self.print_debug_msg("Error: Wrong Query tail forwarding")
@@ -1136,25 +1152,25 @@ impl Node  {
                                 &MsgData::FwQuery { key: *key, forward_tail: false }
                             );
 
-                            if self.maybe_next_responsible(key) {
-                                self.send_msg(self.get_succ(), &fw_query);
+                            if self.maybe_next_responsible(key).await {
+                                self.send_msg(self.get_succ().await, &fw_query).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_query);
+                                self.send_msg(self.get_prev().await, &fw_query).await;
                             }
                         }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         }
     }
 
-    fn handle_query_all(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_query_all(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::QueryAll {  } => {
-                let records_reader = self.records.read().unwrap();
+                let records_reader = self.records.read().await;
                 self.print_debug_msg(&format!("All records: {:?}", records_reader));
                 let mut res = Vec::new();
                 // works as barrier for printing items per node
@@ -1171,7 +1187,7 @@ impl Node  {
                     }
                 }
 
-                let succ_node = self.get_succ();
+                let succ_node = self.get_succ().await;
                 if succ_node.unwrap().id == self.get_id() {
                     // node is alone 
                     let user_msg = Message::new(
@@ -1179,7 +1195,7 @@ impl Node  {
                         None,
                         &MsgData::Reply { reply: utils::format_queryall_msg(&res) }
                     );
-                    client.unwrap().send_msg(&user_msg);
+                    client.unwrap().send_msg(&user_msg).await;
                     return;
                 }
 
@@ -1189,17 +1205,17 @@ impl Node  {
                     &MsgData::FwQueryAll { record_list: res, header:self.get_id() }
                 );
 
-                self.send_msg(succ_node, &fw_msg); 
+                self.send_msg(succ_node, &fw_msg).await; 
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
         }
     }
 
-    fn handle_fw_query_all(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_fw_query_all(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwQueryAll { record_list, header } => {
-                self.print_debug_msg(&format!("All records: {:?}", self.records.read().unwrap()));
-                let records_reader = self.records.read().unwrap();
+                let records_reader = self.records.read().await;
+                self.print_debug_msg(&format!("All records: {:?}", self.records.read().await));
                 let mut record_clone = record_list.clone();
                 // works as barrier for printing items per node
                 let node_item = Item{
@@ -1216,7 +1232,7 @@ impl Node  {
                     }
                 }
             
-                let succ_node = self.get_succ();
+                let succ_node = self.get_succ().await;
                 if !succ_node.is_none(){
                     if succ_node.unwrap().id == *header{
                         // If this is the original sender, reply with the accumulated data
@@ -1225,7 +1241,7 @@ impl Node  {
                             None,
                             &MsgData::Reply { reply: utils::format_queryall_msg(&record_clone)}
                         );
-                        client.unwrap().send_msg(&user_msg);
+                        client.unwrap().send_msg(&user_msg).await;
                     }
                     else {
                         // Otherwise, forward the query along the ring
@@ -1235,7 +1251,7 @@ impl Node  {
                             &MsgData::FwQueryAll { record_list: record_clone, header: *header }
                         );
             
-                        self.send_msg(succ_node, &fw_msg);
+                        self.send_msg(succ_node, &fw_msg).await;
                     }
                 }
 
@@ -1246,19 +1262,20 @@ impl Node  {
     }
     
 
-    fn handle_delete(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_delete(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::Delete {key} => {
                 let key_hash = HashFunc(key);
-                match self.get_consistency() {
+                let cons = self.get_consistency().await;
+                match cons {
                     Consistency::Eventual => {
                         /* Any replica manager can delete and inform client immediately.
                            If delete initiated from an intermediate node, the propagation must 
                            be delivered to both directions. To avoid ping-pong messaged each 
                            forwarded message will then follow only one direction, denoted by the 
                            special field 'forward_back' */
-                        if self.is_replica_manager(&key_hash) >= 0 {
-                            let res = self.records.write().unwrap().remove(&key_hash);
+                        if self.is_replica_manager(&key_hash).await >= 0 {
+                            let res = self.records.write().await.remove(&key_hash);
                             match res {
                                 Some(found) => {
                                     let user_msg = Message::new(
@@ -1266,16 +1283,16 @@ impl Node  {
                                         None,
                                         &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) sucessfully!", found.title, found.value) }
                                     );
-                                    client.unwrap().send_msg(&user_msg);
+                                    client.unwrap().send_msg(&user_msg).await;
 
                                     // propagate to other replica managers if needed (async)
-                                    if found.replica_idx < self.get_current_k() {
+                                    if found.replica_idx < self.get_current_k().await {
                                         let fw_next = Message::new(
                                             MsgType::FwDelete,
                                             None,
                                             &MsgData::FwDelete { key: key_hash, forward_back: false }
                                         );
-                                        self.send_msg(self.get_succ(), &fw_next);
+                                        self.send_msg(self.get_succ().await, &fw_next).await;
                                     }
                                     if found.replica_idx > 0 {
                                         let fw_back = Message::new(
@@ -1283,7 +1300,7 @@ impl Node  {
                                             None,
                                             &MsgData::FwDelete { key: key_hash, forward_back: true }
                                         );
-                                        self.send_msg(self.get_prev(), &fw_back);
+                                        self.send_msg(self.get_prev().await, &fw_back).await;
                                     }
                                 }
 
@@ -1293,7 +1310,7 @@ impl Node  {
                                         None,
                                         &MsgData::Reply { reply: format!("Error: Title 🔑 {} doesn't exist!", key) }
                                     );
-                                    client.unwrap().send_msg(&user_msg);
+                                    client.unwrap().send_msg(&user_msg).await;
                                 }
                             }
 
@@ -1304,10 +1321,10 @@ impl Node  {
                                 client,
                                 &MsgData::Delete { key: key.clone() }
                             );
-                            if self.maybe_next_responsible(&key_hash) {
-                                self.send_msg(self.get_succ(), &fw_del);
+                            if self.maybe_next_responsible(&key_hash).await {
+                                self.send_msg(self.get_succ().await, &fw_del).await;
                             } else {
-                                self.send_msg(self.get_prev(), &fw_del);
+                                self.send_msg(self.get_prev().await, &fw_del).await;
                             }
                         }
                     }
@@ -1315,19 +1332,19 @@ impl Node  {
                     Consistency::Chain => {
                         /* Only the primary node can perform the first 'logical' delete request.
                             by setting 'pending' to true. Forwarding happens as in insert. */
-                            if self.is_responsible(&key_hash) {
-                                let mut record_writer = self.records.write().unwrap();
+                            if self.is_responsible(&key_hash).await {
+                                let mut record_writer = self.records.write().await;
                                 let record = record_writer.get_mut(&key_hash);
                                 match record {
                                     Some(exist) => {
                                         exist.pending = true;
-                                        if exist.replica_idx < self.get_current_k() {
+                                        if exist.replica_idx < self.get_current_k().await {
                                             let fw_del = Message::new(
                                                 MsgType::FwDelete,
                                                 client,
                                                 &MsgData::FwDelete { key: key_hash, forward_back: false }
                                             );
-                                            self.send_msg(self.get_succ(), &fw_del);
+                                            self.send_msg(self.get_succ().await, &fw_del).await;
                                         }
                                     }
 
@@ -1338,7 +1355,7 @@ impl Node  {
                                             &MsgData::Reply { reply: format!("Error: 🔑 {} doesn't exist!", key) }
                                         );
 
-                                        client.unwrap().send_msg(&user_msg);
+                                        client.unwrap().send_msg(&user_msg).await;
                                         return;
                                     }
                                 }
@@ -1350,15 +1367,15 @@ impl Node  {
                                     client,
                                     &MsgData::Delete { key: key.clone() }
                                 );
-                                if self.maybe_next_responsible(&key_hash) {
-                                    self.send_msg(self.get_succ(), &fw_del);
+                                if self.maybe_next_responsible(&key_hash).await {
+                                    self.send_msg(self.get_succ().await, &fw_del).await;
                                 } else {
-                                    self.send_msg(self.get_prev(), &fw_del);
+                                    self.send_msg(self.get_prev().await, &fw_del).await;
                                 }
                             }
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported consistency model - {:?}", self.get_consistency()))
+                    _ => self.print_debug_msg(&format!("Unsupported consistency model - {:?}", cons))
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
@@ -1366,14 +1383,15 @@ impl Node  {
              
     }
 
-    fn handle_fw_delete(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_fw_delete(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwDelete { key, forward_back } => {
                 // forward back is used to avoid ping-pong messages between nodes...
-                match self.get_consistency() {
+                let cons = self.get_consistency().await;
+                match cons {
                     Consistency::Eventual => {
-                        if self.is_replica_manager(key) >= 0 {
-                            let res = self.records.write().unwrap().remove(key);
+                        if self.is_replica_manager(key).await >= 0 {
+                            let res = self.records.write().await.remove(key);
                             match res {
                                 Some(found) => {
                                     let fw_del = Message::new(
@@ -1382,11 +1400,11 @@ impl Node  {
                                         &MsgData::FwDelete { key: key.clone(), forward_back: *forward_back }
                                     );
                                     if found.replica_idx > 0 && *forward_back == true {
-                                        self.send_msg(self.get_prev(), &fw_del);
+                                        self.send_msg(self.get_prev().await, &fw_del).await;
                                         return;
                                     } 
-                                    if found.replica_idx < self.get_current_k() && *forward_back == false {
-                                        self.send_msg(self.get_succ(), &fw_del);
+                                    if found.replica_idx < self.get_current_k().await && *forward_back == false {
+                                        self.send_msg(self.get_succ().await, &fw_del).await;
                                         return;
                                     }
                                 }
@@ -1396,24 +1414,24 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        let mut record_writer = self.records.write().unwrap();
+                        let mut record_writer = self.records.write().await;
                         let record = record_writer.get_mut(&key);
                         match record {
                             Some(exist) => {
                                 exist.pending = true;
-                                if exist.replica_idx < self.get_current_k() {
+                                if exist.replica_idx < self.get_current_k().await {
                                     let fw_del = Message::new(
                                         MsgType::FwDelete,
                                         client,
                                         &MsgData::FwDelete { key: *key, forward_back: false }
                                     );
 
-                                    self.send_msg(self.get_succ(), &fw_del);
+                                    self.send_msg(self.get_succ().await, &fw_del).await;
                                 }
-                                else if exist.replica_idx == self.get_current_k() {
+                                else if exist.replica_idx == self.get_current_k().await {
                                 /* When reach tail: perform first 'physical' delete, reply to client
                                    and initiate acks to previous nodes */
-                                   self.records.write().unwrap().remove(key);
+                                   self.records.write().await.remove(key);
 
                                    let user_msg = Message::new(
                                     MsgType::Reply,
@@ -1421,7 +1439,7 @@ impl Node  {
                                     &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) successfully!", exist.title, exist.value) }
                                    );
 
-                                   client.unwrap().send_msg(&user_msg);
+                                   client.unwrap().send_msg(&user_msg).await;
 
                                    if exist.replica_idx > 0 {
                                     let ack_del = Message::new(
@@ -1429,7 +1447,7 @@ impl Node  {
                                         None,
                                         &MsgData::AckDelete { key: *key }
                                     );
-                                    self.send_msg(self.get_prev(), &ack_del);
+                                    self.send_msg(self.get_prev().await, &ack_del).await;
                                     }
 
                                 }
@@ -1440,24 +1458,24 @@ impl Node  {
                         
                     }
 
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", self.get_consistency()))
+                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
     }
 
-    fn handle_ack_delete(&self, data:&MsgData) {
+    async fn handle_ack_delete(&self, data:&MsgData) {
         /* used for linearizability only
             implement the physical delete here */
         match data {
             MsgData::AckDelete { key } => {
-                let record_reader = self.records.read().unwrap();
+                let record_reader = self.records.read().await;
                 let record = record_reader.get(&key);
                 match record {
                     Some(exist) => {
                         if exist.pending == false {
-                            self.records.write().unwrap().remove(&key);
+                            self.records.write().await.remove(&key);
                         } else {
                             self.print_debug_msg("Error: 'logical' delete must occur first");
                             return;
@@ -1469,7 +1487,7 @@ impl Node  {
                                 &MsgData::AckDelete { key: *key }
                             );
                             
-                            self.send_msg(self.get_prev(), &ack_del);
+                            self.send_msg(self.get_prev().await, &ack_del).await;
                         }
                     }
                     _ => self.print_debug_msg("Wrong delete ack received"),
@@ -1481,7 +1499,7 @@ impl Node  {
     }
 
 
-    fn handle_fw_overlay(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_fw_overlay(&self, client:Option<&NodeInfo>, data:&MsgData) {
     /* send an Info message to successor in a circular loop 
         until it reaches myself again */
         match data {
@@ -1493,7 +1511,7 @@ impl Node  {
                         None,
                         &MsgData::Reply { reply: utils::format_overlay_msg(&peers)}
                     );
-                    client.unwrap().send_msg(&user_msg);
+                    client.unwrap().send_msg(&user_msg).await;
                 } else {
                     let mut peers_clone = peers.clone();
                     peers_clone.push(self.get_info());
@@ -1503,7 +1521,7 @@ impl Node  {
                         &MsgData::FwOverlay { peers: peers_clone }
                     );
             
-                    self.send_msg(self.get_succ(), &fw_msg); 
+                    self.send_msg(self.get_succ().await, &fw_msg).await; 
                 }
 
             }
@@ -1513,13 +1531,13 @@ impl Node  {
 
     }
 
-    fn handle_overlay(&self, client:Option<&NodeInfo>, data:&MsgData) {
+    async fn handle_overlay(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::Overlay {  } => {
                 let mut netvec : Vec<NodeInfo> = Vec::new();
                 netvec.push(self.get_info());
 
-                let succ_node = self.get_succ();
+                let succ_node = self.get_succ().await;
                 if succ_node.unwrap().id == self.get_id() {
                     // node is alone 
                     let user_msg = Message::new(
@@ -1528,7 +1546,7 @@ impl Node  {
                         &MsgData::Reply{ reply: utils::format_overlay_msg(&netvec)}
                     );
 
-                    client.unwrap().send_msg(&user_msg);
+                    client.unwrap().send_msg(&user_msg).await;
                     return;
                 }
                 // begin the traversal
@@ -1537,7 +1555,7 @@ impl Node  {
                     client,
                     &MsgData::FwOverlay { peers: netvec }
                 );
-                self.send_msg(succ_node, &fw_msg);  
+                self.send_msg(succ_node, &fw_msg).await;  
 
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
@@ -1546,8 +1564,9 @@ impl Node  {
 
 }
 
+#[async_trait]
 impl ConnectionHandler for Node {
-    fn handle_request(&self, stream: TcpStream) {
+    async fn handle_request(&self, stream: TcpStream) {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
@@ -1558,12 +1577,12 @@ impl ConnectionHandler for Node {
 
         self.print_debug_msg(&format!("New message from {}", peer_addr));
 
-        let mut reader = BufReader::new(&stream);
+        let mut reader = BufReader::new(stream);
         let mut total_data = Vec::new();
         let mut buffer = [0; 1024];
 
         loop {
-            match reader.read(&mut buffer) {
+            match reader.read(&mut buffer).await {
                 Ok(0) => {
                     eprintln!("Connection closed by peer.");
                     return;
@@ -1586,7 +1605,7 @@ impl ConnectionHandler for Node {
                             // Keep reading until we receive the expected number of bytes
                             while total_data.len() < total_size {
                                 let mut chunk = vec![0; 1024];
-                                let bytes_read = match reader.read(&mut chunk) {
+                                let bytes_read = match reader.read(&mut chunk).await {
                                     Ok(0) => break, // Connection closed
                                     Ok(n) => n,
                                     Err(e) => {
@@ -1633,7 +1652,7 @@ impl ConnectionHandler for Node {
                                             },
                                         );
                                         if let Some(sender) = sender_info {
-                                            sender.send_msg(&error_msg);
+                                            sender.send_msg(&error_msg).await;
                                         }
                                         return;
                                     }
@@ -1641,24 +1660,24 @@ impl ConnectionHandler for Node {
                             }
 
                             match msg_type {
-                                MsgType::Join => self.join_ring(sender_info),
-                                MsgType::FwJoin => self.handle_join(sender_info, &msg_data),
-                                MsgType::AckJoin => self.handle_ack_join(sender_info, &msg_data),
-                                MsgType::Update => self.handle_update(&msg_data),
-                                MsgType::Quit => self.handle_quit(sender_info, &msg_data),
-                                MsgType::Query => self.handle_query(sender_info, &msg_data),
-                                MsgType::FwQuery => self.handle_fw_query(sender_info, &msg_data),
-                                MsgType::QueryAll => self.handle_query_all(sender_info, &msg_data),
-                                MsgType::FwQueryAll => self.handle_fw_query_all(sender_info, &msg_data),
-                                MsgType::Insert => self.handle_insert(sender_info, &msg_data),
-                                MsgType::FwInsert => self.handle_fw_insert(sender_info, &msg_data),
-                                MsgType::AckInsert => self.handle_ack_insert(&msg_data),
-                                MsgType::Delete => self.handle_delete(sender_info, &msg_data),
-                                MsgType::FwDelete => self.handle_fw_delete(sender_info, &msg_data),
-                                MsgType::AckDelete => self.handle_ack_delete(&msg_data),
-                                MsgType::Overlay => self.handle_overlay(sender_info, &msg_data),
-                                MsgType::FwOverlay => self.handle_fw_overlay(sender_info, &msg_data),
-                                MsgType::Relocate => self.handle_relocate(&msg_data),
+                                MsgType::Join => self.join_ring(sender_info).await,
+                                MsgType::FwJoin => self.handle_join(sender_info, &msg_data).await,
+                                MsgType::AckJoin => self.handle_ack_join(sender_info, &msg_data).await,
+                                MsgType::Update => self.handle_update(&msg_data).await,
+                                MsgType::Quit => self.handle_quit(sender_info, &msg_data).await,
+                                MsgType::Query => self.handle_query(sender_info, &msg_data).await,
+                                MsgType::FwQuery => self.handle_fw_query(sender_info, &msg_data).await,
+                                MsgType::QueryAll => self.handle_query_all(sender_info, &msg_data).await,
+                                MsgType::FwQueryAll => self.handle_fw_query_all(sender_info, &msg_data).await,
+                                MsgType::Insert => self.handle_insert(sender_info, &msg_data).await,
+                                MsgType::FwInsert => self.handle_fw_insert(sender_info, &msg_data).await,
+                                MsgType::AckInsert => self.handle_ack_insert(&msg_data).await,
+                                MsgType::Delete => self.handle_delete(sender_info, &msg_data).await,
+                                MsgType::FwDelete => self.handle_fw_delete(sender_info, &msg_data).await,
+                                MsgType::AckDelete => self.handle_ack_delete(&msg_data).await,
+                                MsgType::Overlay => self.handle_overlay(sender_info, &msg_data).await,
+                                MsgType::FwOverlay => self.handle_fw_overlay(sender_info, &msg_data).await,
+                                MsgType::Relocate => self.handle_relocate(&msg_data).await,
                                 _ => eprintln!("Invalid message type: {:?}", msg_type),
                             }
 
@@ -1702,16 +1721,16 @@ impl fmt::Display for ReplicationConfig {
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let prev = self.previous.read().unwrap();
-        let succ = self.successor.read().unwrap();
-        let replica_config = self.replication.read().unwrap();
-        let records_count = self.records.read().unwrap().len(); // Only show count for brevity
+        let prev = &self.previous;
+        let succ = &self.successor;
+        let replica_config = &self.replication;
+        //let records_count = &self.records; // Only show count for brevity
 
         write!(
             f,
             "Node [\n  {},\n  Previous: {:?},\n  Successor: {:?},\n  
-            Replica Managers: {:?},\n  Records Count: {},\n  Status: {:?}\n]",
-            self.info, *prev, *succ, replica_config, records_count, self.status
+            Replica Managers: {:?},\n Status: {:?}\n]",
+            self.info, *prev, *succ, replica_config, self.status
         )
     }
 }

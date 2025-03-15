@@ -1,34 +1,35 @@
-use std::sync::{Arc, Mutex};
-use std::net::{TcpListener, TcpStream};
-use threadpool::ThreadPool;
+use std::sync::Arc;
+use async_trait::async_trait;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};  
+use tokio::runtime::Builder;  // For multi-threaded runtime
 
+#[async_trait]
 pub trait ConnectionHandler: Send + Sync {
-    fn handle_request(&self, stream: TcpStream);
+    async fn handle_request(&self, stream: TcpStream)
+    where
+        Self: Send + Sync;  
 }
 
 pub struct Server<T: ConnectionHandler> {
-    // handler: Arc<Mutex<T>>, 
-    handler : Arc<T>,
+    handler: Arc<T>,
 }
 
 impl<T: ConnectionHandler + 'static> Server<T> {
     pub fn new(handler: T) -> Self {
         Self {
-            //handler: Arc::new(Mutex::new(handler)),
             handler: Arc::new(handler),
         }
     }
 
-    pub fn wait_for_requests(&self, listener: TcpListener, num_workers: usize) {
-        let pool = ThreadPool::new(num_workers);
-        for new_stream in listener.incoming() {
-            match new_stream {
-                Ok(stream) => {
+    pub async fn wait_for_requests(&self, listener: TcpListener) {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
                     let handler = Arc::clone(&self.handler);
-                    pool.execute(move || {
-                        // Lock the mutex to get mutable access
-                        //let handler = handler.lock().unwrap();
-                        handler.handle_request(stream);
+                    tokio::spawn(async move {
+                        handler.handle_request(stream).await;
                     });
                 }
                 Err(e) => {
