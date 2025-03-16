@@ -915,7 +915,7 @@ impl Node  {
                             title: key.clone(),
                             value: value.clone(),
                             replica_idx: *replica as u8, 
-                            pending: k > 0
+                            pending: k > 0 && (*replica as u8) < k
                         };
 
                         self.insert_aux(key_hash, &new_item).await;
