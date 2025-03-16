@@ -802,11 +802,13 @@ impl Node  {
                            It forwards the insert request to all other replica managers without replying to client.
                            Meanwhile the 'pending' field remains true until an ack is received. */
                         if self.is_responsible(&key_hash).await {
+                            let k = self.get_current_k().await;
+                            let is_pending =  k > 0 ; // no need for pending head == tail
                             let new_item = Item{
                                 title: key.clone(),
                                 value: value.clone(),
                                 replica_idx: 0,
-                                pending:true
+                                pending:is_pending
                             };
                             self.insert_aux(key_hash, &new_item).await;
 
@@ -887,15 +889,17 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
+                        let k = self.get_current_k().await;
                         let new_item = Item{
                             title: key.clone(),
                             value: value.clone(),
                             replica_idx: *replica as u8, 
-                            pending: true
+                            pending: k > 0
                         };
+
                         self.insert_aux(key_hash, &new_item).await;
 
-                        if (*replica as u8) < self.get_current_k().await {
+                        if (*replica as u8) < k {
                             let fw_msg = Message::new(
                                 MsgType::FwInsert,
                                 client,
@@ -905,7 +909,7 @@ impl Node  {
 
                             self.send_msg(succ, &fw_msg).await;
                         } 
-                        else if (*replica as u8) == self.get_current_k().await {
+                        else if (*replica as u8) == k {
                             /* If reached tail reply to client and send an ack to previous node */
                             let user_msg = Message::new(
                                 MsgType::Reply,
@@ -915,13 +919,15 @@ impl Node  {
                             
                             client.unwrap().send_msg(&user_msg).await;
 
-                            let ack_msg = Message::new(
-                                MsgType::AckInsert,
-                                None,
-                                &MsgData::AckInsert { key: key_hash }
-                            );
+                            if k > 0 {      // init acks only if tail != head
+                                let ack_msg = Message::new(
+                                    MsgType::AckInsert,
+                                    None,
+                                    &MsgData::AckInsert { key: key_hash }
+                                );
 
-                            self.send_msg(prev, &ack_msg).await;
+                                self.send_msg(prev, &ack_msg).await;
+                            }
                         }
                     }
 
@@ -942,8 +948,10 @@ impl Node  {
                     let mut record_writer = self.records.write().await;
                     if let Some(record) = record_writer.get_mut(&key) {
                         record.pending = false;
+                        let curr_idx = record.replica_idx;
 
-                        if record.replica_idx > 0 {
+                        drop(record_writer);
+                        if curr_idx > 0 {
                             let fw_ack = Message::new(
                                 MsgType::AckInsert,
                                 None,
