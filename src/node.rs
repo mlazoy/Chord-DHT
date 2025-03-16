@@ -240,14 +240,20 @@ impl Node  {
 
     async fn insert_aux(&self, key: HashType, new_record: &Item) {
     self.print_debug_msg("Acquiring write lock on records...");
-        let mut record_writer = self.records.write().await;
+        let record_writer = self.records.read().await;
         // check if an id already exists and if so merge item data
-        if let Some(exist) = record_writer.get_mut(&key) { 
+        if let Some(_) = record_writer.get(&key) { 
+            drop(record_writer);
+            self.sleep_on_updates(key).await;
+
+            let mut record_writer = self.records.write().await;
+            let exist = record_writer.get_mut(&key).unwrap();
             // Concatenate value 
             exist.value = format!("{}{}", exist.value, new_record.value);  
             // perform 'OR' on 'pending' 
             exist.pending = exist.pending || new_record.pending;
         } else {
+            let mut record_writer = self.records.write().await;
             record_writer.insert(key, new_record.clone());  // Insert 
         }
         self.print_debug_msg("Write lock released on records.");
@@ -324,7 +330,7 @@ impl Node  {
         }
     }
 
-    async fn wait_for_update(&self, key_hash: HashType) {
+    async fn spinlock_on_updates(&self, key_hash: HashType) {
         let mut delay = Duration::from_millis(1); // Start with a small delay
         let max_delay = Duration::from_millis(300); // Cap delay to avoid waiting too long
 
@@ -345,6 +351,30 @@ impl Node  {
             sleep(delay).await; // Non-blocking sleep
             delay = (delay * 2).min(max_delay); // Exponential backoff
         }
+}
+
+async fn sleep_on_updates(&self, key_hash: HashType) {
+    loop {
+        let is_pending = {
+            let record_reader = self.records.read().await;
+            record_reader.get(&key_hash).map(|r| r.pending).unwrap_or(false)
+        };
+
+        if !is_pending {
+            return; 
+        }
+
+        // Check if a notifier exists
+        if let Some(notify) = self.pendings.read().await.get(&key_hash) {
+            notify.notified().await; 
+
+        } else { // add new notifier
+            let notify = Arc::new(Notify::new());
+            let mut pending_writer = self.pendings.write().await;
+            pending_writer.insert(key_hash, notify.clone());
+            notify.notified().await; 
+        }
+    }
 }
 
     pub async fn init(&self) { 
@@ -881,6 +911,9 @@ impl Node  {
                            It forwards the insert request to all other replica managers without replying to client.
                            Meanwhile the 'pending' field remains true until an ack is received. */
                         if self.is_responsible(&key_hash).await {
+                            // sleep if it's currently updating
+                            //self.sleep_on_updates(key_hash).await;
+
                             let k = self.get_current_k().await;
                             let is_pending =  k > 0 ; // no need for pending head == tail
                             let new_item = Item{
@@ -1048,17 +1081,17 @@ impl Node  {
                             self.send_msg(self.get_prev().await, &fw_ack).await;
                             return;
                         } 
-                        // else if curr_idx == 0  {
-                        //     // notify waiting readers on this key
-                        //     let waiting_list = self.pendings.write().await;
+                        else if curr_idx == 0  {
+                            // notify waiting readers on this key
+                            let waiting_list = self.pendings.write().await;
 
-                        //     if let Some(notify) = waiting_list.get(&key) {
-                        //         self.print_debug_msg("Sent a notification to ");
-                        //         notify.notify_waiters();  
-                        //         // remove this from queue
-                        //         //waiting_list.remove(&key);
-                        //     }
-                        // }
+                            if let Some(notify) = waiting_list.get(&key) {
+                                self.print_debug_msg("Sent a notification to ");
+                                notify.notify_waiters();  
+                                // remove this from queue
+                                //waiting_list.remove(&key);
+                            }
+                        }
                     }
                     else {
                         drop(record_writer);
@@ -1121,7 +1154,10 @@ impl Node  {
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
                         if self.is_responsible(&key_hash).await {
                             // create a busy-waiting loop to periodaclly check pending
-                            self.wait_for_update(key_hash).await;
+                            //self.spinlock_on_updates(key_hash).await;
+
+                            //create a sleeping process
+                            self.sleep_on_updates(key_hash).await;
                             
                             if  self.get_current_k().await > 0 {
                                 let fw_msg = Message::new(
@@ -1623,6 +1659,17 @@ impl Node  {
                             
                             self.send_msg(self.get_prev().await, &ack_del).await;
                             return;
+                        }
+                        else if idx == 0  {
+                            // notify waiting readers on this key
+                            let waiting_list = self.pendings.write().await;
+
+                            if let Some(notify) = waiting_list.get(&key) {
+                                self.print_debug_msg("Sent a notification to ");
+                                notify.notify_waiters();  
+                                // remove this from queue
+                                //waiting_list.remove(&key);
+                            }
                         }
                     }
                     _ => self.print_debug_msg("Wrong delete ack received"),
