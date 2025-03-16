@@ -966,7 +966,6 @@ impl Node  {
             change 'pending' to false and inform previous */
             match data {
                 MsgData::AckInsert { key } => {
-                    let mut idx = -1;
                     let mut record_writer = self.records.write().await;
                     if let Some(record) = record_writer.get_mut(&key) {
                         record.pending = false;
@@ -984,8 +983,10 @@ impl Node  {
                         return;
                     }
                 }
-                _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
             }
+            
+            _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
+        }
     }
 
     async fn handle_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
