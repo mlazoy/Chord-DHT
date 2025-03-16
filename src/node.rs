@@ -8,7 +8,7 @@ use std::sync::Arc;
 use num_traits::Bounded;
 use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-// use std::io::{Read,Write, BufReader};
+use tokio::time::{sleep, Duration};
 use serde_json::Value;
 use std::{thread, vec};
 use async_trait::async_trait;
@@ -291,6 +291,27 @@ impl Node  {
             records_writer.remove(key);
         }
     }
+
+    async fn wait_for_update(&self, key_hash: HashType) {
+        let mut delay = Duration::from_millis(1); // Start with a small delay
+        let max_delay = Duration::from_millis(300); // Cap delay to avoid waiting too long
+
+        loop {
+            let is_pending = {
+                let record_reader = self.records.read().await;
+                record_reader.get(&key_hash).map(|r| r.pending).unwrap_or(false)
+            };
+
+            if !is_pending {
+                return ;
+            }
+
+            self.print_debug_msg(&format!("Item {} is being updated. Retrying...", key_hash));
+
+            sleep(delay).await; // Non-blocking sleep
+            delay = (delay * 2).min(max_delay); // Exponential backoff
+        }
+}
 
     pub async fn init(&self) { 
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
@@ -945,6 +966,7 @@ impl Node  {
             change 'pending' to false and inform previous */
             match data {
                 MsgData::AckInsert { key } => {
+                    let mut idx = -1;
                     let mut record_writer = self.records.write().await;
                     if let Some(record) = record_writer.get_mut(&key) {
                         record.pending = false;
@@ -958,8 +980,8 @@ impl Node  {
                                 &MsgData::AckInsert { key: *key }
                             );
 
-                            self.send_msg(self.get_prev().await, &fw_ack).await;
-                        }
+                        self.send_msg(self.get_prev().await, &fw_ack).await;
+                        return;
                     }
                 }
                 _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
@@ -1012,77 +1034,67 @@ impl Node  {
                         followed by a read at the "tail" results in non-linear behaviour. 
                         To avoid this, reads are blocked until 'pending' field becomes false.
                         Use the field 'forward_tail' to denote a read can be safely propagated to successor. */
-
                         if self.is_responsible(&key_hash).await {
                             // create a busy-waiting loop to periodaclly check pending
-                            loop {  // TODO! Maybe better to use CondVar ...?
+                            self.wait_for_update(key_hash).await;
+                            
+                            if  self.get_current_k().await > 0 {
+                                let fw_msg = Message::new(
+                                    MsgType::FwQuery,
+                                    client,
+                                    &MsgData::FwQuery { key: key_hash }
+                                );
+                                self.send_msg(succ, &fw_msg).await;
+                                return;
+                            } 
+                            else {
                                 let record_reader = self.records.read().await;
                                 let record = record_reader.get(&key_hash);
                                 match record {
                                     Some(exist) => {
-                                        if exist.pending == true {
-                                            self.print_debug_msg(&format!("Item {} is being updated. Going to sleep...", key_hash));
-                                            // retry after wake up
-                                            continue;
-                                        } 
-                                        else {
-                                            if exist.replica_idx < self.get_current_k().await {
-                                                let fw_msg = Message::new(
-                                                    MsgType::FwQuery,
-                                                    client,
-                                                    &MsgData::FwQuery { key: key_hash }
-                                                );
-                                                self.send_msg(succ, &fw_msg).await;
-                                                return;
-                                            } 
-                                            else {
-                                                let user_msg = Message::new(
-                                                    MsgType::Reply,
-                                                    None,
-                                                    &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
-                                                );
-
-                                                client.unwrap().send_msg(&user_msg).await;
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    
-                                    _ => {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Error: Title 🔑{} doesn't exist", key) }
+                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg).await;
                                         return;
                                     }
-                                }
-                            }
-                        }
-                        else {
-                            let fw_query = Message::new(
-                                MsgType::Query,
-                                client,
-                                &MsgData::Query { key: key.clone() }
-                            ); 
 
-                            if self.maybe_next_responsible(&key_hash).await {
-                                self.send_msg(succ, &fw_query).await;
-                            } else {
-                                self.send_msg(prev, &fw_query).await;
+                                    _ => {
+                                        let user_msg = Message::new(
+                                            MsgType::Reply,
+                                            None,
+                                            &MsgData::Reply { reply: format!("Title : 🔑 {} doesn't exist", key) }
+                                        );
+
+                                        client.unwrap().send_msg(&user_msg).await;
+                                        return;
+                                    }
+                                }           
                             }
                         }
-    
+                    else {
+                    let fw_query = Message::new(
+                        MsgType::Query,
+                        client,
+                        &MsgData::Query { key: key.clone() }
+                    ); 
+
+                    if self.maybe_next_responsible(&key_hash).await {
+                        self.send_msg(succ, &fw_query).await;
+                    } else {
+                        self.send_msg(prev, &fw_query).await;
                     }
-                    _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
             }
-
-            _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
+            _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
         }
     }
+        _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
+    }
+}
 
     async fn handle_fw_query(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
@@ -1123,36 +1135,51 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
-                        
-                            let record_reader = self.records.read().await;
-                            let record = record_reader.get(key);
-                            match record {
-                                Some(exist) => {
-                                    if exist.replica_idx < self.get_current_k().await {
-                                        let fw_tail = Message::new(
-                                            MsgType::FwQuery,
-                                            client,
-                                            &MsgData::FwQuery { key: *key }
-                                        );
+                            let k = self.get_current_k().await;
+                            let idx = self.is_replica_manager(key).await;
+                            if idx < 0 {
+                                self.print_debug_msg("Wrong query forwarding\n");
+                                return;
+                            }
+                            if (idx as u8) < k {
+                                let fw_tail = Message::new(
+                                    MsgType::FwQuery,
+                                    client,
+                                    &MsgData::FwQuery { key: *key }
+                                );
 
-                                        self.send_msg(self.get_succ().await, &fw_tail).await;
-                                    } 
-                                    else if exist.replica_idx == self.get_current_k().await {
-                                        // reached tail so can finally reply to client
+                                self.send_msg(self.get_succ().await, &fw_tail).await;
+                                return;
+                            } 
+                            // reached tail so we can reply
+                            else if (idx as u8) == k {
+                                let record_reader = self.records.read().await;
+                                let record = record_reader.get(key);
+                                match record {
+                                    Some(exist) => {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
                                             &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
                                         );
-
+        
                                         client.unwrap().send_msg(&user_msg).await;
+                                        return;
+                                    }
+
+                                    _ => {
+                                        let user_msg = Message::new(
+                                            MsgType::Reply,
+                                            None,
+                                            &MsgData::Reply { reply: format!("Key 🔑 {} doesn't exist.\n", key.clone()) }
+                                        );
+        
+                                        client.unwrap().send_msg(&user_msg).await;
+                                        return;
                                     }
                                 }
-                                _ => self.print_debug_msg("Error: Wrong Query tail forwarding")
                             }
-                        
                     }
-
                     _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
                 }
             }
@@ -1463,17 +1490,19 @@ impl Node  {
             implement the physical delete here */
         match data {
             MsgData::AckDelete { key } => {
-                let record_reader = self.records.read().await;
-                let record = record_reader.get(&key);
+            let record_reader = self.records.read().await;
+            let record = record_reader.get(&key);
                 match record {
                     Some(exist) => {
-                        if exist.pending == false {
+                        let idx = exist.replica_idx.clone();
+                        if exist.pending {
+                            drop(record_reader); 
                             self.records.write().await.remove(&key);
                         } else {
                             self.print_debug_msg("Error: 'logical' delete must occur first");
                             return;
                         }
-                        if exist.replica_idx > 0 {
+                        if  idx > 0 {
                             let ack_del = Message::new(
                                 MsgType::AckDelete,
                                 None,
@@ -1481,6 +1510,7 @@ impl Node  {
                             );
                             
                             self.send_msg(self.get_prev().await, &ack_del).await;
+                            return;
                         }
                     }
                     _ => self.print_debug_msg("Wrong delete ack received"),
