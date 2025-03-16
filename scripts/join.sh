@@ -13,11 +13,11 @@ PORTS=("8001" "8002")
 #join for the bootsrap first
 echo "Running 'cli join' on $IP for port ${BOOT_PORTS[0]}"
 cargo run --release cli $BOOTSTRAP_IP ${BOOT_PORTS[0]} join
-sleep 5
+sleep 1
 
 echo "Running 'cli join' on $IP for port ${BOOT_PORTS[1]}"
 cargo run --release cli $BOOTSTRAP_IP ${BOOT_PORTS[1]} join
-sleep 5
+sleep 1
 
 # Iterate over each IP and run the cli commands
 for i in $(seq 1 ${#IP_ADDRESSES[@]}); do
@@ -26,12 +26,12 @@ for i in $(seq 1 ${#IP_ADDRESSES[@]}); do
   # Run the first `cli` command for port 8000
   echo "Running 'cli join' on $IP for port ${PORTS[0]}"
   cargo run --release cli $IP ${PORTS[0]} join
-  sleep 5
+  sleep 1
 
   # Run the second `cli` command for port 8001
   echo "Running 'cli join' on $IP for port ${PORTS[1]}"
   cargo run --release cli $IP ${PORTS[1]} join
-  sleep 5
+  sleep 1
 done
 
 echo "Finished running CLI join commands for all nodes"
