@@ -968,6 +968,7 @@ impl Node  {
                 MsgData::AckInsert { key } => {
                     let mut record_writer = self.records.write().await;
                     if let Some(record) = record_writer.get_mut(&key) {
+                        assert!(record.pending);
                         record.pending = false;
                         let curr_idx = record.replica_idx;
 
@@ -982,6 +983,11 @@ impl Node  {
                         self.send_msg(self.get_prev().await, &fw_ack).await;
                         return;
                     }
+                }
+                else {
+                    drop(record_writer);
+                    self.print_debug_msg("Invalid ack!?\n");
+                    return;
                 }
             }
             
