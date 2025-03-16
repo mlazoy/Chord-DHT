@@ -252,11 +252,11 @@ where
         for (i, set) in self.replication_vector.iter().enumerate().rev() {
             if set.lower < set.upper { // normal case
                 if set.in_range(element) {
-                    return (rev_idx - i) as i16;
+                    return (rev_idx - i + 1) as i16;
                 }
             } else { // wrap-around set
                 if element > set.lower || element <= set.upper { // wrap-around case
-                    return (rev_idx - i) as i16;
+                    return (rev_idx - i + 1) as i16;
                 }
             }
         }
@@ -290,7 +290,7 @@ where
         let mut pos = None;
 
         for (i, range) in self.replication_vector.iter().enumerate(){
-            if range.in_range(new_key) { // split here
+            if range.in_range(new_key) || new_key > range.lower || new_key <= range.upper { // split here
                 let split_left = Range::new(
                     range.lower,
                     new_key,
@@ -308,11 +308,13 @@ where
                 new_ranges.push(split_right);
                 pos =  Some(i);
                 break;
-            }
+            } 
         }
         if let Some(idx) = pos {
             self.replication_vector.remove(idx);
             self.replication_vector.splice(idx..idx, new_ranges); // Insert the new ones at the same position
+        } else {
+            panic!("Unable to find split point\n");
         }
     }
 

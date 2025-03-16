@@ -1,3 +1,4 @@
+
 #![allow(dead_code, non_snake_case, unused_imports)]
 
 use tokio::net::{TcpListener, TcpStream};
@@ -14,6 +15,8 @@ use std::{thread, vec};
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt,BufReader,AsyncWriteExt};
 use std::fmt;
+use std::collections::HashMap;
+use tokio::sync::Notify;
 
 use crate::messages::{Message, MsgType, MsgData};
 use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item, Range, UnionRange};
@@ -46,6 +49,7 @@ pub struct Node {
     bootstrap : Option<NodeInfo>,                           // no lock because it is read only
     replication: Arc<RwLock<ReplicationConfig>>,             // wraps k, m, ids             
     records : Arc<RwLock<BTreeMap<HashType, Item>>>,        // list of hashed records per node
+    pendings : Arc<RwLock<HashMap<HashType, Arc<Notify>>>>,    // keeps track of blocked queries at head
     status: Arc<AtomicBool>                                 // denotes if server is alive
 }
 
@@ -137,6 +141,7 @@ impl Node  {
             bootstrap: _boot_ref,
             replication: Arc::new(RwLock::new(init_replication)),
             records: Arc::new(RwLock::new(BTreeMap::new())),
+            pendings: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(AtomicBool::new(false)) 
         }
     }
@@ -149,6 +154,7 @@ impl Node  {
             bootstrap: self.bootstrap,
             replication: self.replication.clone(),
             records: Arc::clone(&self.records),
+            pendings: Arc::clone(&self.pendings),
             status: Arc::clone(&self.status)
         }
     }
@@ -174,19 +180,29 @@ impl Node  {
     }
 
     async fn get_prev(&self) -> Option<NodeInfo> {
-        *self.previous.read().await
+        self.print_debug_msg("Acquiring read lock on previous...");
+        let ret = *self.previous.read().await;
+        self.print_debug_msg("Read lock acquired on previous.");
+        return ret;
     }
 
     async fn get_succ(&self) -> Option<NodeInfo> {
-        *self.successor.read().await
+        self.print_debug_msg("Acquiring read lock on successor...");
+        let ret = *self.successor.read().await;
+        self.print_debug_msg("Read lock acquired on successor.");
+        return ret;
     }
 
     async fn set_prev(&self, new_node:Option<NodeInfo>) {
+    self.print_debug_msg("Acquiring write lock on previous...");
         *self.previous.write().await = new_node;
+    self.print_debug_msg("Write lock released on previous.");
     }
 
     async fn set_succ(&self, new_node:Option<NodeInfo>) {
+    self.print_debug_msg("Acquiring write lock on successor...");
         *self.successor.write().await = new_node;
+    self.print_debug_msg("Write lock released on successor.");
     }
 
     fn get_info(&self) -> NodeInfo {
@@ -194,24 +210,36 @@ impl Node  {
     }
 
     async fn get_replica_ranges(&self) -> UnionRange<HashType> {
-        self.replication.read().await.replica_ranges.clone()
+        self.print_debug_msg("Acquiring read lock on replication...");
+        let ret = self.replication.read().await.replica_ranges.clone();
+        self.print_debug_msg("Read lock acquired on replication.");
+        return ret;
     }
 
     async fn get_consistency(&self) -> Consistency {
-        self.replication.read().await.replication_mode
+        self.print_debug_msg("Acquiring read lock on replication...");
+        let ret =self.replication.read().await.replication_mode;
+        self.print_debug_msg("Read lock acquired on replication.");
+        return ret;
     }
 
     async fn max_replication(&self) -> u8 {
-        self.replication.read().await.replication_factor
+        self.print_debug_msg("Acquiring read lock on replication...");
+        let ret = self.replication.read().await.replication_factor;
+        self.print_debug_msg("Read lock acquired on replication.");
+        return ret;
     }
 
     // dynamically adjusts replication factor when online nodes are less than k
     async fn get_current_k(&self) -> u8 {
+        self.print_debug_msg("Acquiring read lock on replication...");
         let k = self.replication.read().await.replication_factor;
+        self.print_debug_msg("Read lock acquired on replication.");
         std::cmp::min(self.get_replica_ranges().await.get_size() as u8 , k) 
     }
 
     async fn insert_aux(&self, key: HashType, new_record: &Item) {
+    self.print_debug_msg("Acquiring write lock on records...");
         let mut record_writer = self.records.write().await;
         // check if an id already exists and if so merge item data
         if let Some(exist) = record_writer.get_mut(&key) { 
@@ -222,6 +250,7 @@ impl Node  {
         } else {
             record_writer.insert(key, new_record.clone());  // Insert 
         }
+        self.print_debug_msg("Write lock released on records.");
     }
 
     async fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &Message) -> Option<TcpStream> {
@@ -256,6 +285,7 @@ impl Node  {
     async fn is_replica_manager(&self, key:&HashType) -> i16 {
         if self.is_responsible(key).await { return 0; }
         let replica_reader = self.get_replica_ranges().await;
+        self.print_debug_msg(&format!("Ranges: {:?} for key {}", replica_reader, key));
         return replica_reader.is_subset(*key);
     }
 
@@ -276,7 +306,9 @@ impl Node  {
 
     async fn relocate_replicas(&self) {
         let k = self.get_current_k().await;
+    self.print_debug_msg("Acquiring write lock on records...");
         let mut records_writer = self.records.write().await;
+    self.print_debug_msg("Write lock released on records.");
         let mut to_remove: Vec<HashType> = Vec::new();
         for (key, item) in records_writer.iter_mut(){
             if item.replica_idx == k {
@@ -298,7 +330,9 @@ impl Node  {
 
         loop {
             let is_pending = {
+                self.print_debug_msg("Acquiring read lock on records...");
                 let record_reader = self.records.read().await;
+                self.print_debug_msg("Read lock acquired on records.");
                 record_reader.get(&key_hash).map(|r| r.pending).unwrap_or(false)
             };
 
@@ -397,7 +431,9 @@ impl Node  {
                         true); 
                     //Update current replica ranges 
                     {
+                        self.print_debug_msg("Acquiring write lock on replication...");
                         let mut replication_writer = self.replication.write().await;
+                        self.print_debug_msg("Write lock released on replication.");
                         let my_replica_ranges = &mut replication_writer.replica_ranges;
                         my_replica_ranges.insert(new_range);   // add new node's key range
                         if my_replica_ranges.get_size() == (max_k + 1) as usize { 
@@ -427,7 +463,9 @@ impl Node  {
                     // find records to share with the new node according to new managers and previous
                     let mut vec_items: Vec<Item> = Vec::new();
                     {
+                        self.print_debug_msg("Acquiring read lock on records...");
                         let records_read = self.records.read().await;
+                        self.print_debug_msg("Read lock acquired on records.");
                         for (key, item) in records_read.iter() {
                             if item.replica_idx > 0 || (item.replica_idx == 0 && !self.is_responsible(key).await) {
                                 vec_items.push(item.clone());
@@ -481,7 +519,7 @@ impl Node  {
                         let rel_msg = Message::new(
                             MsgType::Relocate,
                             None,
-                            &MsgData::Relocate { k_remaining: k - 2, inc: true, new_copies: None, range: Some(new_range) }
+                            &MsgData::Relocate { k_remaining: k-2, inc: true, new_copies: None, range: Some(new_range) }
                         );
 
                         self.send_msg(succ_rd, &rel_msg).await;
@@ -498,7 +536,7 @@ impl Node  {
                     );
                     self.send_msg(succ_rd, &fw_msg).await;
                 } 
-
+                self.print_debug_msg(&format!("Replica ranges: {:?}", self.get_replica_ranges().await));
             }
             _ => self.print_debug_msg(&format!("Unexpected message data - {:?}", data)),
         }
@@ -517,7 +555,9 @@ impl Node  {
                 }
                 
                 {
+                    self.print_debug_msg("Acquiring write lock on replication...");
                     let mut replication_writer = self.replication.write().await;
+                    self.print_debug_msg("Write lock released on replication.");
                     replication_writer.replication_factor = replica_config.replication_factor;
                     replication_writer.replication_mode = replica_config.replication_mode;
                     // get replica managers assert vector is empty in this point
@@ -536,6 +576,7 @@ impl Node  {
                     &MsgData::Reply { reply: format!("New node {} joined the ring sucessfully!", self.get_id()) }
                 );
                 client.unwrap().send_msg(&user_msg).await;
+                self.print_debug_msg(&format!("Ack:Replica ranges: {:?}", self.get_replica_ranges().await));
             }
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data))
         }
@@ -566,7 +607,9 @@ impl Node  {
 
                 if *inc { // case 'join'
                     {
+                        self.print_debug_msg("Acquiring write lock on records...");
                         let mut records_writer = self.records.write().await;
+                        self.print_debug_msg("Write lock released on records.");
                         let mut to_remove: Vec<HashType> = Vec::new();
                         for (key, item) in records_writer.iter_mut(){
                             if item.replica_idx == k {
@@ -582,7 +625,9 @@ impl Node  {
 
                     // update ranges 
                     if let Some(split) = range {
+                        self.print_debug_msg("Acquiring write lock on replication...");
                         let mut replication_writer = self.replication.write().await;
+                        self.print_debug_msg("Write lock released on replication.");
                         let ranges = &mut replication_writer.replica_ranges;
 
                         ranges.split_range(split.get_bounds().1);
@@ -606,7 +651,9 @@ impl Node  {
                 else { // case 'depart'
                 let mut to_transfer: Vec<Item> = Vec::new();
                 {
+                    self.print_debug_msg("Acquiring write lock on records...");
                     let mut records_writer = self.records.write().await;
+                    self.print_debug_msg("Write lock released on records.");
                     for (_key, item) in records_writer.iter_mut(){
                         if item.replica_idx == k {
                             to_transfer.push(item.clone());
@@ -622,7 +669,9 @@ impl Node  {
                         range_to_transfer.set_upper(self.get_succ().await.unwrap().id);
                     }
                     if let Some(range) = range {
+                        self.print_debug_msg("Acquiring write lock on replication...");
                         let mut replica_writer = self.replication.write().await;
+                        self.print_debug_msg("Write lock released on replication.");
                         let ranges = &mut replica_writer.replica_ranges;
                         ranges.merge_at(*k_remaining as usize);
                         ranges.insert_head(range.clone());
@@ -632,7 +681,9 @@ impl Node  {
                     if let Some(copies) = new_copies { 
                         for copy in copies.iter(){
                             let key_copy = HashFunc(&copy.title);
+                            self.print_debug_msg("Acquiring read lock on records...");
                             if self.records.read().await.get(&key_copy).is_none() {
+                                self.print_debug_msg("Read lock acquired on records.");
                                 self.insert_aux(key_copy, &copy).await;
                             }
                         }
@@ -647,10 +698,11 @@ impl Node  {
                         );
 
                         self.send_msg(self.get_succ().await, &rel_msg).await;
+                        self.print_debug_msg(&format!("Ranges after relocation: {:?}", self.get_replica_ranges().await));
                         return;
                     } 
                 }
-
+                self.print_debug_msg(&format!("Ranges after relocation: {:?}", self.get_replica_ranges().await));
             }
 
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
@@ -709,7 +761,9 @@ impl Node  {
             // gather last repicas
             let mut last_replicas = Vec::new();
             let k = self.get_current_k().await;
+    self.print_debug_msg("Acquiring read lock on records...");
             let record_reader = self.records.read().await;
+    self.print_debug_msg("Read lock acquired on records.");
             for (_key, item) in record_reader.iter(){
                 if item.replica_idx == k {
                     last_replicas.push(item.clone());
@@ -734,11 +788,15 @@ impl Node  {
             }
         }
         // delete all records 
+    self.print_debug_msg("Acquiring write lock on records...");
         let mut map = self.records.write().await;
+    self.print_debug_msg("Write lock released on records.");
         map.clear();
         
 
+    self.print_debug_msg("Acquiring write lock on replication...");
         let mut replica = self.replication.write().await;
+    self.print_debug_msg("Write lock released on replication.");
         replica.replica_ranges.clear();
         
         // change status and inform user
@@ -919,8 +977,10 @@ impl Node  {
                         };
 
                         self.insert_aux(key_hash, &new_item).await;
-
+                        self.print_debug_msg("Here 1");
+                        self.print_debug_msg(&format!("Replica: {}, k: {}", replica, k));
                         if (*replica as u8) < k {
+                            self.print_debug_msg("Here 2");
                             let fw_msg = Message::new(
                                 MsgType::FwInsert,
                                 client,
@@ -929,9 +989,11 @@ impl Node  {
                             );
 
                             self.send_msg(succ, &fw_msg).await;
+                            return;
                         } 
                         else if (*replica as u8) == k {
                             /* If reached tail reply to client and send an ack to previous node */
+                            self.print_debug_msg("Here 3");
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
@@ -949,6 +1011,7 @@ impl Node  {
 
                                 self.send_msg(prev, &ack_msg).await;
                             }
+                            self.print_debug_msg("Here 4");
                         }
                     }
 
@@ -966,7 +1029,9 @@ impl Node  {
             change 'pending' to false and inform previous */
             match data {
                 MsgData::AckInsert { key } => {
+                    self.print_debug_msg("Acquiring write lock on records...");
                     let mut record_writer = self.records.write().await;
+                    self.print_debug_msg("Write lock released on records.");
                     if let Some(record) = record_writer.get_mut(&key) {
                         assert!(record.pending);
                         record.pending = false;
@@ -980,15 +1045,26 @@ impl Node  {
                                 &MsgData::AckInsert { key: *key }
                             );
 
-                        self.send_msg(self.get_prev().await, &fw_ack).await;
+                            self.send_msg(self.get_prev().await, &fw_ack).await;
+                            return;
+                        } 
+                        // else if curr_idx == 0  {
+                        //     // notify waiting readers on this key
+                        //     let waiting_list = self.pendings.write().await;
+
+                        //     if let Some(notify) = waiting_list.get(&key) {
+                        //         self.print_debug_msg("Sent a notification to ");
+                        //         notify.notify_waiters();  
+                        //         // remove this from queue
+                        //         //waiting_list.remove(&key);
+                        //     }
+                        // }
+                    }
+                    else {
+                        drop(record_writer);
+                        self.print_debug_msg("Invalid ack!?");
                         return;
                     }
-                }
-                else {
-                    drop(record_writer);
-                    self.print_debug_msg("Invalid ack!?\n");
-                    return;
-                }
             }
             
             _ => self.print_debug_msg(&format!("unexpected data - {:?}", data)),
@@ -1006,7 +1082,9 @@ impl Node  {
                     Consistency::Eventual => {
                         // whoever has a replica can reply
                         if self.is_replica_manager(&key_hash).await >= 0 {
+    self.print_debug_msg("Acquiring read lock on records...");
                             let records_reader = self.records.read().await;
+    self.print_debug_msg("Read lock acquired on records.");
                             let res = records_reader.get(&key_hash);
                             let reply: &str = match res {
                                 Some(found) => &format!("Found data: (🔑 {} : 🔒{})", found.title, found.value),
@@ -1055,7 +1133,9 @@ impl Node  {
                                 return;
                             } 
                             else {
+                                self.print_debug_msg("Acquiring read lock on records...");
                                 let record_reader = self.records.read().await;
+                                self.print_debug_msg("Read lock acquired on records.");
                                 let record = record_reader.get(&key_hash);
                                 match record {
                                     Some(exist) => {
@@ -1082,20 +1162,20 @@ impl Node  {
                                 }           
                             }
                         }
-                    else {
-                    let fw_query = Message::new(
-                        MsgType::Query,
-                        client,
-                        &MsgData::Query { key: key.clone() }
-                    ); 
+                        else {
+                            let fw_query = Message::new(
+                                MsgType::Query,
+                                client,
+                                &MsgData::Query { key: key.clone() }
+                            ); 
 
-                    if self.maybe_next_responsible(&key_hash).await {
-                        self.send_msg(succ, &fw_query).await;
-                    } else {
-                        self.send_msg(prev, &fw_query).await;
+                            if self.maybe_next_responsible(&key_hash).await {
+                                self.send_msg(succ, &fw_query).await;
+                            } else {
+                                self.send_msg(prev, &fw_query).await;
+                            }
+                        }
                     }
-                }
-            }
             _ => self.print_debug_msg(&format!("Unsupported Consistency model - {:?}", cons))
         }
     }
@@ -1111,7 +1191,9 @@ impl Node  {
                     Consistency::Eventual => {
                         // same as Query but hash is pre-computed
                         if self.is_replica_manager(&key).await >= 0 {
+                            self.print_debug_msg("Acquiring read lock on records...");
                             let records_reader = self.records.read().await;
+                            self.print_debug_msg("Read lock acquired on records.");
                             let res = records_reader.get(&key);
                             let reply: &str = match res {
                                 Some(found) => &format!("Found (🔑 {} : 🔒{})", found.title, found.value),
@@ -1145,7 +1227,7 @@ impl Node  {
                             let k = self.get_current_k().await;
                             let idx = self.is_replica_manager(key).await;
                             if idx < 0 {
-                                self.print_debug_msg("Wrong query forwarding\n");
+                                self.print_debug_msg("Wrong query forwarding");
                                 return;
                             }
                             if (idx as u8) < k {
@@ -1160,7 +1242,9 @@ impl Node  {
                             } 
                             // reached tail so we can reply
                             else if (idx as u8) == k {
-                                let record_reader = self.records.read().await;
+                            self.print_debug_msg("Acquiring read lock on records...");
+                            let record_reader = self.records.read().await;
+                            self.print_debug_msg("Read lock acquired on records.");
                                 let record = record_reader.get(key);
                                 match record {
                                     Some(exist) => {
@@ -1178,7 +1262,8 @@ impl Node  {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Key 🔑 {} doesn't exist.\n", key.clone()) }
+                                            &MsgData::Reply { reply: format!("Key 🔑 {} doesn't exist.
+", key.clone()) }
                                         );
         
                                         client.unwrap().send_msg(&user_msg).await;
@@ -1197,7 +1282,9 @@ impl Node  {
     async fn handle_query_all(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::QueryAll {  } => {
+    self.print_debug_msg("Acquiring read lock on records...");
                 let records_reader = self.records.read().await;
+    self.print_debug_msg("Read lock acquired on records.");
                 self.print_debug_msg(&format!("All records: {:?}", records_reader));
                 let mut res = Vec::new();
                 // works as barrier for printing items per node
@@ -1241,8 +1328,12 @@ impl Node  {
     async fn handle_fw_query_all(&self, client:Option<&NodeInfo>, data:&MsgData) {
         match data {
             MsgData::FwQueryAll { record_list, header } => {
+    self.print_debug_msg("Acquiring read lock on records...");
                 let records_reader = self.records.read().await;
+    self.print_debug_msg("Read lock acquired on records.");
+    self.print_debug_msg("Acquiring read lock on records...");
                 self.print_debug_msg(&format!("All records: {:?}", self.records.read().await));
+    self.print_debug_msg("Read lock acquired on records.");
                 let mut record_clone = record_list.clone();
                 // works as barrier for printing items per node
                 let node_item = Item{
@@ -1302,7 +1393,9 @@ impl Node  {
                            forwarded message will then follow only one direction, denoted by the 
                            special field 'forward_back' */
                         if self.is_replica_manager(&key_hash).await >= 0 {
+    self.print_debug_msg("Acquiring write lock on records...");
                             let res = self.records.write().await.remove(&key_hash);
+    self.print_debug_msg("Write lock released on records.");
                             match res {
                                 Some(found) => {
                                     let user_msg = Message::new(
@@ -1360,7 +1453,9 @@ impl Node  {
                         /* Only the primary node can perform the first 'logical' delete request.
                             by setting 'pending' to true. Forwarding happens as in insert. */
                             if self.is_responsible(&key_hash).await {
+    self.print_debug_msg("Acquiring write lock on records...");
                                 let mut record_writer = self.records.write().await;
+    self.print_debug_msg("Write lock released on records.");
                                 let record = record_writer.get_mut(&key_hash);
                                 match record {
                                     Some(exist) => {
@@ -1418,7 +1513,9 @@ impl Node  {
                 match cons {
                     Consistency::Eventual => {
                         if self.is_replica_manager(key).await >= 0 {
+    self.print_debug_msg("Acquiring write lock on records...");
                             let res = self.records.write().await.remove(key);
+    self.print_debug_msg("Write lock released on records.");
                             match res {
                                 Some(found) => {
                                     let fw_del = Message::new(
@@ -1441,7 +1538,9 @@ impl Node  {
                     }
 
                     Consistency::Chain => {
+    self.print_debug_msg("Acquiring write lock on records...");
                         let mut record_writer = self.records.write().await;
+    self.print_debug_msg("Write lock released on records.");
                         let record = record_writer.get_mut(&key);
                         match record {
                             Some(exist) => {
@@ -1458,7 +1557,9 @@ impl Node  {
                                 else if exist.replica_idx == self.get_current_k().await {
                                 /* When reach tail: perform first 'physical' delete, reply to client
                                    and initiate acks to previous nodes */
+    self.print_debug_msg("Acquiring write lock on records...");
                                    self.records.write().await.remove(key);
+    self.print_debug_msg("Write lock released on records.");
 
                                    let user_msg = Message::new(
                                     MsgType::Reply,
@@ -1497,14 +1598,18 @@ impl Node  {
             implement the physical delete here */
         match data {
             MsgData::AckDelete { key } => {
+    self.print_debug_msg("Acquiring read lock on records...");
             let record_reader = self.records.read().await;
+    self.print_debug_msg("Read lock acquired on records.");
             let record = record_reader.get(&key);
                 match record {
                     Some(exist) => {
                         let idx = exist.replica_idx.clone();
                         if exist.pending {
                             drop(record_reader); 
+    self.print_debug_msg("Acquiring write lock on records...");
                             self.records.write().await.remove(&key);
+    self.print_debug_msg("Write lock released on records.");
                         } else {
                             self.print_debug_msg("Error: 'logical' delete must occur first");
                             return;
@@ -1758,8 +1863,14 @@ impl fmt::Display for Node {
 
         write!(
             f,
-            "Node [\n  {},\n  Previous: {:?},\n  Successor: {:?},\n  
-            Replica Managers: {:?},\n Status: {:?}\n]",
+            "Node [
+  {},
+  Previous: {:?},
+  Successor: {:?},
+  
+            Replica Managers: {:?},
+ Status: {:?}
+]",
             self.info, *prev, *succ, replica_config, self.status
         )
     }
