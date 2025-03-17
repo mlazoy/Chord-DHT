@@ -691,6 +691,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                     }
                 } 
                 else { // case 'depart'
+                if k > 0 {
                 let mut to_transfer: Vec<Item> = Vec::new();
                 {
                     self.print_debug_msg("Acquiring write lock on records...");
@@ -745,6 +746,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                     } 
                 }
                 self.print_debug_msg(&format!("Ranges after relocation: {:?}", self.get_replica_ranges().await));
+            }
             }
 
             _ => self.print_debug_msg(&format!("Unexpected data - {:?}", data)),
@@ -803,9 +805,9 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
             // gather last repicas
             let mut last_replicas = Vec::new();
             let k = self.get_current_k().await;
-    self.print_debug_msg("Acquiring read lock on records...");
+            self.print_debug_msg("Acquiring read lock on records...");
             let record_reader = self.records.read().await;
-    self.print_debug_msg("Read lock acquired on records.");
+            self.print_debug_msg("Read lock acquired on records.");
             for (_key, item) in record_reader.iter(){
                 if item.replica_idx == k {
                     last_replicas.push(item.clone());
@@ -815,14 +817,14 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
             // TODO! Test this
             let succ = self.get_succ().await;
             let ranges = self.get_replica_ranges().await;
-            let mut range = ranges.get_head();
+            let range = if ranges.get_size() > 0 {Some(ranges.get_head())} else { None };
             if ranges.get_size() == 1 {
-                range.set_upper(succ.unwrap().id);
+                range.unwrap().set_upper(succ.unwrap().id);
             }
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k-1 , inc: false, new_copies: Some(last_replicas), range: Some(range) }
+                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: range }
             );
             
             if succ.unwrap().id != self.get_id() {
@@ -830,15 +832,15 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
             }
         }
         // delete all records 
-    self.print_debug_msg("Acquiring write lock on records...");
+        self.print_debug_msg("Acquiring write lock on records...");
         let mut map = self.records.write().await;
-    self.print_debug_msg("Write lock released on records.");
+        self.print_debug_msg("Write lock released on records.");
         map.clear();
         
 
-    self.print_debug_msg("Acquiring write lock on replication...");
+        self.print_debug_msg("Acquiring write lock on replication...");
         let mut replica = self.replication.write().await;
-    self.print_debug_msg("Write lock released on replication.");
+        self.print_debug_msg("Write lock released on replication.");
         replica.replica_ranges.clear();
         
         // change status and inform user
@@ -928,6 +930,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
 
                             let k = self.get_current_k().await;
                             let is_pending =  k > 0 ; // no need for pending head == tail
+                            self.print_debug_msg(&format!("Inserting key: {} with pending: {}", key, is_pending));
                             let new_item = Item{
                                 title: key.clone(),
                                 value: value.clone(),
@@ -936,7 +939,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             };
                             self.insert_aux(key_hash, &new_item).await;
 
-                            if self.get_current_k().await > 0 {
+                            if k > 0 {
                                 let fw_ins = Message::new(
                                     MsgType::FwInsert,
                                     client,
@@ -944,6 +947,13 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                                                 replica: 1, forward_back: false }
                                 );
                                 self.send_msg(succ, &fw_ins).await;
+                            } else if k == 0 {
+                                let user_msg = Message::new(
+                                    MsgType::Reply,
+                                    None,
+                                    &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", key, value) }
+                                );
+                                client.unwrap().send_msg(&user_msg).await;
                             }
                         } else {
                             let fw_ins = Message::new(
