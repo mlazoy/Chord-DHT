@@ -255,10 +255,9 @@ impl Node  {
             let exist = record_writer.get_mut(&key).unwrap();
             exist.value = format!("{}{}", exist.value, new_record.value);
             exist.pending |= new_record.pending;  // Perform 'OR' on 'pending'
-            exist.timestamp = Utc::now();
+            exist.timestamp = new_record.timestamp;
         } else {
             let mut record_writer = self.records.write().await;
-            new_record.timestamp = Utc::now();
             record_writer.insert(key, new_record.clone());
         }
     
