@@ -238,26 +238,30 @@ impl Node  {
         std::cmp::min(self.get_replica_ranges().await.get_size() as u8 , k) 
     }
 
+   
     async fn insert_aux(&self, key: HashType, new_record: &Item) {
-    self.print_debug_msg("Acquiring write lock on records...");
-        let record_writer = self.records.read().await;
-        // check if an id already exists and if so merge item data
-        if let Some(_) = record_writer.get(&key) { 
-            drop(record_writer);
+        self.print_debug_msg("Acquiring write lock on records...");
+    
+        let exists = {
+            let record_reader = self.records.read().await;
+            record_reader.get(&key).is_some()
+        };
+    
+        if exists {
             self.sleep_on_updates(key).await;
-
+    
             let mut record_writer = self.records.write().await;
             let exist = record_writer.get_mut(&key).unwrap();
-            // Concatenate value 
-            exist.value = format!("{}{}", exist.value, new_record.value);  
-            // perform 'OR' on 'pending' 
-            exist.pending = exist.pending || new_record.pending;
+            exist.value = format!("{}{}", exist.value, new_record.value);
+            exist.pending |= new_record.pending;  // Perform 'OR' on 'pending'
         } else {
             let mut record_writer = self.records.write().await;
-            record_writer.insert(key, new_record.clone());  // Insert 
+            record_writer.insert(key, new_record.clone());
         }
+    
         self.print_debug_msg("Write lock released on records.");
     }
+    
 
     async fn send_msg(&self, dest_node: Option<NodeInfo>, msg: &Message) -> Option<TcpStream> {
         if let Some(dest) = dest_node {
@@ -357,25 +361,33 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
     loop {
         let is_pending = {
             let record_reader = self.records.read().await;
-            record_reader.get(&key_hash).map(|r| r.pending).unwrap_or(false)
+            let pending = record_reader.get(&key_hash).map(|r| r.pending).unwrap_or(false);
+            drop(record_reader);  // ✅ Release the lock before awaiting
+            pending
         };
 
         if !is_pending {
             return; 
         }
 
-        // Check if a notifier exists
-        if let Some(notify) = self.pendings.read().await.get(&key_hash) {
-            notify.notified().await; 
+        let notify = {
+            let pending_reader = self.pendings.read().await;
+            pending_reader.get(&key_hash).cloned()  // Clone Arc<Notify> to avoid holding lock
+        };
 
-        } else { // add new notifier
-            let notify = Arc::new(Notify::new());
-            let mut pending_writer = self.pendings.write().await;
-            pending_writer.insert(key_hash, notify.clone());
-            notify.notified().await; 
+        match notify {
+            Some(n) => n.notified().await, // ✅ Await outside lock
+            None => {
+                let notify = Arc::new(Notify::new());
+                let mut pending_writer = self.pendings.write().await;
+                pending_writer.insert(key_hash, notify.clone());
+                drop(pending_writer); // ✅ Drop before awaiting
+                notify.notified().await;
+            }
         }
     }
 }
+
 
     pub async fn init(&self) { 
         let sock_addr = SocketAddrV4::new(self.get_ip(), self.get_port());
