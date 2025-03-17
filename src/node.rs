@@ -868,7 +868,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                         /* every replica manager can save the new item loally 
                             and reply to client immediately. */
                         let replica= self.is_replica_manager(&key_hash).await;
-                        if replica >= 0 {
+                        if replica == 0 {
                             let mut new_item = Item::new( 
                                 key, 
                                 value, 
@@ -1139,9 +1139,9 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                     Consistency::Eventual => {
                         // whoever has a replica can reply
                         if self.is_replica_manager(&key_hash).await >= 0 {
-    self.print_debug_msg("Acquiring read lock on records...");
+                            self.print_debug_msg("Acquiring read lock on records...");
                             let records_reader = self.records.read().await;
-    self.print_debug_msg("Read lock acquired on records.");
+                            self.print_debug_msg("Read lock acquired on records.");
                             let res = records_reader.get(&key_hash);
                             let reply: &str = match res {
                                 Some(found) => &format!("Found data: (🔑 {} : 🔒{}, 🕰️ {})", found.title, found.value, found.timestamp),
