@@ -880,7 +880,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
-                                &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", key, value) }
+                                &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", key, value, new_item.timestamp) }
                             );
                             client.unwrap().send_msg(&user_msg).await;
 
@@ -954,7 +954,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                 let user_msg = Message::new(
                                     MsgType::Reply,
                                     None,
-                                    &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", key, value, Utc::now()) }
+                                    &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", key, value, new_item.timestamp) }
                                 );
                                 client.unwrap().send_msg(&user_msg).await;
                             }
@@ -1055,7 +1055,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
-                                &MsgData::Reply {reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", new_item.title, new_item.value, Utc::now())}
+                                &MsgData::Reply {reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", new_item.title, new_item.value, new_item.timestamp)}
                             );
                             
                             client.unwrap().send_msg(&user_msg).await;
