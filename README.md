@@ -10,8 +10,8 @@ cargo build
 ```
 cargo run --release bootsrtap <REPLICA_FACTOR> <CONSISTENCY>
 ```
-- <REPLICA_FACTOR> : defines the number of copies for each item in the key-value store in neighbouring nodes and must be > 0.
-- <CONSISTENCY> supports 2 models : 0 => Enevtual, 1 => Chain Replication
+- REPLICA_FACTOR : defines the number of copies for each item in the key-value store in neighbouring nodes and must be > 0.
+- CONSISTENCY supports 2 models : 0 => Enevtual, 1 => Chain Replication
 
 
 **2.** To start a peer node server, open a new terminal and type:
