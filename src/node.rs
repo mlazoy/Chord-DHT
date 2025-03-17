@@ -17,6 +17,7 @@ use tokio::io::{AsyncReadExt,BufReader,AsyncWriteExt};
 use std::fmt;
 use std::collections::HashMap;
 use tokio::sync::Notify;
+use chrono::{DateTime, Utc};
 
 use crate::messages::{Message, MsgType, MsgData};
 use crate::utils::{Consistency, DebugMsg, HashFunc, HashIP, HashType, Item, Range, UnionRange};
@@ -239,7 +240,7 @@ impl Node  {
     }
 
    
-    async fn insert_aux(&self, key: HashType, new_record: &Item) {
+    async fn insert_aux(&self, key: HashType, new_record: &mut Item) {
         self.print_debug_msg("Acquiring write lock on records...");
     
         let exists = {
@@ -254,8 +255,10 @@ impl Node  {
             let exist = record_writer.get_mut(&key).unwrap();
             exist.value = format!("{}{}", exist.value, new_record.value);
             exist.pending |= new_record.pending;  // Perform 'OR' on 'pending'
+            exist.timestamp = Utc::now();
         } else {
             let mut record_writer = self.records.write().await;
+            new_record.timestamp = Utc::now();
             record_writer.insert(key, new_record.clone());
         }
     
@@ -591,7 +594,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                 self.set_prev(*prev_info).await;
                 self.set_succ(*succ_info).await;
                 // insert new_items
-                for item in new_items.iter() {
+                for item in new_items.clone().iter_mut() {
                     let new_key = HashFunc(&item.title);
                     self.insert_aux(new_key, item).await;
                 }
@@ -722,12 +725,12 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                     }
                     // create one more replica manager for last copies
                     if let Some(copies) = new_copies { 
-                        for copy in copies.iter(){
+                        for copy in copies.clone().iter_mut(){
                             let key_copy = HashFunc(&copy.title);
                             self.print_debug_msg("Acquiring read lock on records...");
                             if self.records.read().await.get(&key_copy).is_none() {
                                 self.print_debug_msg("Read lock acquired on records.");
-                                self.insert_aux(key_copy, &copy).await;
+                                self.insert_aux(key_copy, copy).await;
                             }
                         }
                     }
@@ -867,12 +870,12 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             and reply to client immediately. */
                         let replica= self.is_replica_manager(&key_hash).await;
                         if replica >= 0 {
-                            let new_item = Item{ 
-                                title:key.clone(), 
-                                value:value.clone(), 
-                                replica_idx:replica as u8, 
-                                pending:false };
-                            self.insert_aux(key_hash, &new_item).await;
+                            let mut new_item = Item::new( 
+                                key, 
+                                value, 
+                                replica as u8, 
+                                false );
+                            self.insert_aux(key_hash, &mut new_item).await;
 
                             let user_msg = Message::new(
                                 MsgType::Reply,
@@ -931,13 +934,13 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             let k = self.get_current_k().await;
                             let is_pending =  k > 0 ; // no need for pending head == tail
                             self.print_debug_msg(&format!("Inserting key: {} with pending: {}", key, is_pending));
-                            let new_item = Item{
-                                title: key.clone(),
-                                value: value.clone(),
-                                replica_idx: 0,
-                                pending:is_pending
-                            };
-                            self.insert_aux(key_hash, &new_item).await;
+                            let mut new_item = Item:: new(
+                                key,
+                                value,
+                                0,
+                                is_pending
+                            );
+                            self.insert_aux(key_hash, &mut new_item).await;
 
                             if k > 0 {
                                 let fw_ins = Message::new(
@@ -951,7 +954,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                 let user_msg = Message::new(
                                     MsgType::Reply,
                                     None,
-                                    &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", key, value) }
+                                    &MsgData::Reply { reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", key, value, Utc::now()) }
                                 );
                                 client.unwrap().send_msg(&user_msg).await;
                             }
@@ -989,11 +992,11 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                 match cons {
                     Consistency::Eventual => {
                         if *replica >= 0 {
-                            self.insert_aux(key_hash, &Item { 
-                                title: key.clone(), 
-                                value: value.clone(), 
-                                replica_idx: *replica as u8, 
-                                pending: false }).await;
+                            self.insert_aux(key_hash, &mut Item::new ( 
+                                key, 
+                                value, 
+                                *replica as u8, 
+                                false )).await;
 
                             if *replica > 0 && *forward_back == true {
                                 let fw_ins = Message::new(
@@ -1024,14 +1027,14 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
 
                     Consistency::Chain => {
                         let k = self.get_current_k().await;
-                        let new_item = Item{
-                            title: key.clone(),
-                            value: value.clone(),
-                            replica_idx: *replica as u8, 
-                            pending: k > 0 && (*replica as u8) < k
-                        };
+                        let mut new_item = Item:: new(
+                            key,
+                            value,
+                            *replica as u8, 
+                            k > 0 && (*replica as u8) < k
+                        );
 
-                        self.insert_aux(key_hash, &new_item).await;
+                        self.insert_aux(key_hash, &mut new_item).await;
                         self.print_debug_msg("Here 1");
                         self.print_debug_msg(&format!("Replica: {}, k: {}", replica, k));
                         if (*replica as u8) < k {
@@ -1052,7 +1055,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             let user_msg = Message::new(
                                 MsgType::Reply,
                                 None,
-                                &MsgData::Reply {reply: format!("Inserted (🔑 {} : 🔒{}) successfully!", new_item.title, new_item.value)}
+                                &MsgData::Reply {reply: format!("Inserted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", new_item.title, new_item.value, Utc::now())}
                             );
                             
                             client.unwrap().send_msg(&user_msg).await;
@@ -1142,7 +1145,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
     self.print_debug_msg("Read lock acquired on records.");
                             let res = records_reader.get(&key_hash);
                             let reply: &str = match res {
-                                Some(found) => &format!("Found data: (🔑 {} : 🔒{})", found.title, found.value),
+                                Some(found) => &format!("Found data: (🔑 {} : 🔒{}, 🕰️ {})", found.title, found.value, found.timestamp),
                                 _ => &format!("Error: 🔑{} doesn't exist", key)
                             };
                             
@@ -1200,7 +1203,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
+                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{}, 🕰️ {})", exist.title, exist.value, exist.timestamp) }
                                         );
 
                                         client.unwrap().send_msg(&user_msg).await;
@@ -1254,7 +1257,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                             self.print_debug_msg("Read lock acquired on records.");
                             let res = records_reader.get(&key);
                             let reply: &str = match res {
-                                Some(found) => &format!("Found (🔑 {} : 🔒{})", found.title, found.value),
+                                Some(found) => &format!("Found (🔑 {} : 🔒{}, 🕰️ {})", found.title, found.value, found.timestamp),
                                 _ => &format!("Error: {} doesn't exist", key)
                             };
                             
@@ -1309,7 +1312,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                         let user_msg = Message::new(
                                             MsgType::Reply,
                                             None,
-                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{})", exist.title, exist.value) }
+                                            &MsgData::Reply { reply: format!("Found (🔑 {} : 🔒{}, 🕰️ {})", exist.title, exist.value, exist.timestamp) }
                                         );
         
                                         client.unwrap().send_msg(&user_msg).await;
@@ -1346,12 +1349,12 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                 self.print_debug_msg(&format!("All records: {:?}", records_reader));
                 let mut res = Vec::new();
                 // works as barrier for printing items per node
-                let node_item = Item{
-                    title: format!("__nodeID__"),
-                    value: self.get_id().to_string(),
-                    pending:false,
-                    replica_idx:0
-                };
+                let node_item = Item::new (
+                    &format!("__nodeID__"),
+                    &self.get_id().to_string(),
+                    0,
+                    false
+                );
                 res.push(node_item);
                 for (_key, item) in records_reader.iter() {
                     if item.replica_idx == 0 && item.pending == false {
@@ -1394,12 +1397,12 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
     self.print_debug_msg("Read lock acquired on records.");
                 let mut record_clone = record_list.clone();
                 // works as barrier for printing items per node
-                let node_item = Item{
-                    title: format!("__nodeID__"),
-                    value: self.get_id().to_string(),
-                    pending:false,
-                    replica_idx:0
-                };
+                let node_item = Item::new(
+                    &format!("__nodeID__"),
+                    &self.get_id().to_string(),
+                    0,
+                    false
+                );
                 record_clone.push(node_item);
                 // Append current node's relevant records
                 for (_, item) in records_reader.iter() {
@@ -1459,7 +1462,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                     let user_msg = Message::new(
                                         MsgType::Reply,
                                         None,
-                                        &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) sucessfully!", found.title, found.value) }
+                                        &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) at 🕰️ {} sucessfully!", found.title, found.value, found.timestamp) }
                                     );
                                     client.unwrap().send_msg(&user_msg).await;
 
@@ -1622,7 +1625,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                    let user_msg = Message::new(
                                     MsgType::Reply,
                                     None,
-                                    &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) successfully!", exist.title, exist.value) }
+                                    &MsgData::Reply { reply: format!("Deleted (🔑 {} : 🔒{}) at 🕰️ {} successfully!", exist.title, exist.value, exist.timestamp) }
                                    );
 
                                    client.unwrap().send_msg(&user_msg).await;

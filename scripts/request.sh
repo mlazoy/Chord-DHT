@@ -33,14 +33,17 @@ for key in "${!IP_PORT_MAP[@]}"; do
     cargo build --release --target-dir "$target_dir"  # Build the project
 done
 
-# Loop through the IP_PORT_MAP and run the queries concurrently
+
 for key in "${!IP_PORT_MAP[@]}"; do
     ip=$(echo "$key" | cut -d ':' -f 1)
     port=$(echo "$key" | cut -d ':' -f 2)
     target_dir="target_${port}"
     CARGO_TARGET_DIR="$target_dir"  
-    cargo run --release --target-dir "$target_dir" cli "$ip" "$port" requests $(get_requests_file "$ip" "$port") &  # Run the requests data function in the background
+    log_file="outputs/output_${ip}_${port}.log"
+    
+    cargo run --release --target-dir "$target_dir" cli "$ip" "$port" requests $(get_requests_file "$ip" "$port") > "$log_file" &
 done
+
 
 # Wait for all background processes to finish
 wait

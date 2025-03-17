@@ -17,12 +17,12 @@ fn send_request(ip: Ipv4Addr, port: u16, request_msg: &Message) -> Result<String
     let address = format!("{}:{}", ip, port);
     let response_ip = get_local_ip();
     let response_port = port + (process::id() % 1000) as u16;
-    println!("Sending request to {}: {}", address, request);
+    eprintln!("Sending request to {}: {}", address, request);
     let response_address = format!("{}:{}", response_ip, response_port);
 
     // 🚀 Step 1: Start a listening socket on response_port
     let listener = TcpListener::bind(&response_address).map_err(|e| format!("Failed to bind response port: {}", e))?;
-    println!("Listening for response on {}", response_address);
+    eprintln!("Listening for response on {}", response_address);
 
     // 🚀 Step 2: Send request to the node, including the response port
     let full_request = format!("{}", request);

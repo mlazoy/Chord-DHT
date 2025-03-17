@@ -7,6 +7,7 @@ use std::net::{Ipv4Addr, UdpSocket};
 use hex::{FromHex, ToHex};
 use std::cmp::Ord;
 use num_traits::Bounded;
+use chrono::{DateTime, Utc};
 
 use crate::node::NodeInfo;
 
@@ -114,7 +115,20 @@ pub struct Item {
     pub value : String,
     pub replica_idx : u8,
     // used for Chain replication to block dirty tail reads
-    pub pending: bool,      
+    pub pending: bool,  
+    pub timestamp: DateTime<Utc>,
+}
+
+impl Item {
+    pub fn new(title:&str, value:&str, replica_idx:u8, pending:bool) -> Self {
+        Item {
+            title:title.to_string(), 
+            value:value.to_string(), 
+            replica_idx, 
+            pending,
+            timestamp: Utc::now(), // stub when created 
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
