@@ -1527,6 +1527,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                                 &MsgData::FwDelete { key: key_hash, forward_back: false }
                                             );
                                             self.send_msg(self.get_succ().await, &fw_del).await;
+                                            return;
                                         }
                                     }
 
@@ -1599,13 +1600,18 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
 
                     Consistency::Chain => {
     self.print_debug_msg("Acquiring write lock on records...");
-                        let mut record_writer = self.records.write().await;
+                        let record_reader = self.records.read().await;
     self.print_debug_msg("Write lock released on records.");
-                        let record = record_writer.get_mut(&key);
+                        let record = record_reader.get(&key).cloned();
+                        drop(record_reader);
                         match record {
                             Some(exist) => {
-                                exist.pending = true;
                                 if exist.replica_idx < self.get_current_k().await {
+                                    //drop(record_reader);
+                                    let mut new_lock = self.records.write().await;
+                                    let rec = new_lock.get_mut(&key);
+                                    rec.unwrap().pending = true;
+                                    drop(new_lock);
                                     let fw_del = Message::new(
                                         MsgType::FwDelete,
                                         client,
@@ -1613,13 +1619,16 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                                     );
 
                                     self.send_msg(self.get_succ().await, &fw_del).await;
+                                    return;
                                 }
                                 else if exist.replica_idx == self.get_current_k().await {
                                 /* When reach tail: perform first 'physical' delete, reply to client
                                    and initiate acks to previous nodes */
     self.print_debug_msg("Acquiring write lock on records...");
-                                   self.records.write().await.remove(key);
+                                   let mut record_writer = self.records.write().await;
+                                   record_writer.remove(key);
     self.print_debug_msg("Write lock released on records.");
+                                    drop(record_writer);
 
                                    let user_msg = Message::new(
                                     MsgType::Reply,
@@ -1661,12 +1670,13 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
     self.print_debug_msg("Acquiring read lock on records...");
             let record_reader = self.records.read().await;
     self.print_debug_msg("Read lock acquired on records.");
-            let record = record_reader.get(&key);
+            let record = record_reader.get(&key).cloned();
+            drop(record_reader);
                 match record {
                     Some(exist) => {
                         let idx = exist.replica_idx.clone();
                         if exist.pending {
-                            drop(record_reader); 
+                            //drop(record_reader); 
     self.print_debug_msg("Acquiring write lock on records...");
                             self.records.write().await.remove(&key);
     self.print_debug_msg("Write lock released on records.");
@@ -1686,7 +1696,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                         }
                         else if idx == 0  {
                             // notify waiting readers on this key
-                            let waiting_list = self.pendings.write().await;
+                            let waiting_list = self.pendings.read().await;
 
                             if let Some(notify) = waiting_list.get(&key) {
                                 self.print_debug_msg("Sent a notification to ");
