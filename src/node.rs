@@ -658,7 +658,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                         for (key, item) in records_writer.iter_mut(){
                             if item.replica_idx == k {
                                 to_remove.push(*key);
-                            } else if item.replica_idx > 0 && item.replica_idx < k {
+                            } else if item.replica_idx > (k - k_remaining - 1) && item.replica_idx < k {
                                 item.replica_idx += 1;
                             } 
                         }
@@ -693,7 +693,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                     }
                 } 
                 else { // case 'depart'
-                if k > 0 {
+                if *k_remaining > 0 {
                 let mut to_transfer: Vec<Item> = Vec::new();
                 {
                     self.print_debug_msg("Acquiring write lock on records...");
@@ -703,7 +703,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
                         if item.replica_idx == k {
                             to_transfer.push(item.clone());
                         }
-                        if item.replica_idx > 0 {
+                        if item.replica_idx > (k - k_remaining -1) {
                             item.replica_idx -= 1;
                         } 
                     }
@@ -778,6 +778,17 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
             client.unwrap().send_msg(&user_msg).await;
             return;
         }
+        let k = self.get_current_k().await;
+        let max_k = self.max_replication().await;
+        if k <= max_k {
+            let user_msg = Message::new(
+                MsgType::Reply, 
+                None,
+                &MsgData::Reply { reply: format!("Network configuration must have at least {} nodes", max_k+1) }
+            );
+            client.unwrap().send_msg(&user_msg).await;
+            return;
+        }
         /* construct an Update Message for previous
             only neighbours change ? */ 
         if let Some(prev_node) = prev {
@@ -826,7 +837,7 @@ async fn sleep_on_updates(&self, key_hash: HashType) {
             let rel_msg = Message::new(
                 MsgType::Relocate,
                 None,
-                &MsgData::Relocate { k_remaining: k , inc: false, new_copies: Some(last_replicas), range: range }
+                &MsgData::Relocate { k_remaining: k - 1 , inc: false, new_copies: Some(last_replicas), range: range }
             );
             
             if succ.unwrap().id != self.get_id() {
